@@ -30,7 +30,9 @@ ROOMS = {
     "体育室（Ｃ）": "C",
 }
 
-CLOSED_DAY_MESSAGE = "この日は休館日のため、予約できません。"
+# 页面只要出现这三个字，就判定休馆。
+CLOSED_DAY_KEYWORD = "休館日"
+
 MAX_DATES_PER_RUN = 120
 
 
@@ -346,12 +348,10 @@ def get_dates(page):
 
             const candidates = [element];
 
-            // 检查日期元素内部的文字。
             candidates.push(
                 ...Array.from(element.querySelectorAll('*'))
             );
 
-            // 检查日期所在的单元格。
             const cell = element.closest('td');
 
             if (cell) {
@@ -396,7 +396,6 @@ def get_dates(page):
 
         is_closed = bool(red_colors)
 
-        # 重复日期只要有一个入口显示红色，就按休馆处理。
         result[date_text] = (
             result.get(date_text, False) or is_closed
         )
@@ -424,7 +423,8 @@ def japanese_date(date_text):
 
 
 # ============================================================
-# 点击后的休馆提示：备用判断
+# 休馆判断
+# 页面只要出现「休館日」就算休馆
 # ============================================================
 
 def is_closed_day(page):
@@ -433,10 +433,7 @@ def is_closed_day(page):
             "body"
         ).inner_text(timeout=5000)
 
-        normalized = re.sub(r"\s+", "", body_text)
-        message = re.sub(r"\s+", "", CLOSED_DAY_MESSAGE)
-
-        return message in normalized
+        return CLOSED_DAY_KEYWORD in body_text
 
     except Exception:
         return False
@@ -483,12 +480,11 @@ def switch_date(page, date_text):
         page.wait_for_function(
             """args => {
                 const body = document.body
-                    ? document.body.innerText.replace(/\\s+/g, "")
+                    ? document.body.innerText
                     : "";
 
-                const closed = args.closedMessage.replace(/\\s+/g, "");
-
-                if (body.includes(closed)) {
+                // 只要出现「休館日」就算休馆。
+                if (body.includes("休館日")) {
                     return true;
                 }
 
@@ -500,13 +496,21 @@ def switch_date(page, date_text):
                     caption.innerText.includes(args.expected);
             }""",
             arg={
-                "closedMessage": CLOSED_DAY_MESSAGE,
                 "expected": expected,
             },
             timeout=12000,
         )
 
     except PlaywrightTimeoutError:
+        # 等待超时后再次检查休馆关键词。
+        # 有休馆提示就直接跳过，不抛出异常。
+        if is_closed_day(page):
+            log(
+                f"{date_text} 页面出现「休館日」，"
+                "判定休馆，直接跳过"
+            )
+            return False
+
         try:
             log(f"日期切换等待超时，当前 URL：{page.url}")
             log(f"当前页面标题：{page.title()}")
@@ -532,10 +536,12 @@ def switch_date(page, date_text):
 
     page.wait_for_timeout(300)
 
+    # 无论休馆提示的完整句子是什么，
+    # 只要页面出现「休館日」就直接跳过。
     if is_closed_day(page):
         log(
-            f"{date_text} 是休馆日，"
-            "页面提示休馆 → 跳过"
+            f"{date_text} 页面出现「休館日」，"
+            "判定休馆 → 跳过"
         )
         return False
 
