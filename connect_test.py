@@ -6,197 +6,179 @@ from playwright.sync_api import sync_playwright
 
 OFFICIAL_URL = (
     "https://www.nakakumin.com/"
-    "takenomaruchikusen/smartphone/"
+    "takenomaruchikusen/"
 )
 
-BASE_URL = "https://www.nakakumin.com/takenomaruchikusen/"
-
-KEYWORDS = [
-    "予約",
-    "空き状況",
-    "空き照会",
-    "施設予約",
-    "reserve1"
-]
-
-os.makedirs("artifacts", exist_ok=True)
+REPORT_DIR = "artifacts"
+os.makedirs(REPORT_DIR, exist_ok=True)
 
 report = {
     "test_time": datetime.now(timezone.utc).isoformat(),
     "official_url": OFFICIAL_URL,
-    "final_url": "",
+    "reservation_url": "",
     "page_title": "",
-    "links": [],
-    "buttons": [],
+    "grand_options": [],
+    "selects": [],
     "forms": [],
-    "iframes": [],
-    "scripts": [],
-    "booking_candidates": [],
-    "other_page_candidates": {},
+    "page_text": "",
     "errors": []
 }
 
 
-def find_candidates(items):
-    result = []
-
-    for item in items:
-        combined = (
-            str(item.get("text", "")) + " " +
-            str(item.get("href", "")) + " " +
-            str(item.get("onclick", ""))
-        ).lower()
-
-        if any(word.lower() in combined for word in KEYWORDS):
-            result.append(item)
-
-    return result
+def save_report():
+    with open(
+        os.path.join(REPORT_DIR, "report.json"),
+        "w",
+        encoding="utf-8"
+    ) as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
 
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     page = browser.new_page(locale="ja-JP")
-    page.set_default_timeout(20000)
+    page.set_default_timeout(30000)
 
     try:
         print("1. 打开竹之丸官网")
 
-        response = page.goto(
+        page.goto(
             OFFICIAL_URL,
             wait_until="domcontentloaded",
             timeout=60000
         )
+        page.wait_for_timeout(2000)
 
-        page.wait_for_timeout(3000)
+        print("官网：", page.url)
+        print("标题：", page.title())
 
-        print("官网地址：", page.url)
-        print("页面标题：", page.title())
-        print("HTTP状态：", response.status if response else None)
+        print("2. 找到官网预约表单")
 
-        print("2. 读取官网所有链接")
+        reservation_form = page.locator(
+            'form[action*="VisitorLogin.php"]'
+        ).first
 
-        report["links"] = page.locator("a").evaluate_all("""
-            elements => elements.map(a => ({
-                text: (a.innerText || a.textContent || "").trim(),
-                href: a.href,
-                onclick: a.getAttribute("onclick")
-            }))
+        if reservation_form.count() == 0:
+            raise Exception("没有找到官网预约表单")
+
+        form_data = reservation_form.evaluate("""
+            form => ({
+                action: form.action,
+                method: form.method,
+                target: form.target,
+                inputs: Array.from(form.querySelectorAll("input")).map(
+                    input => ({
+                        name: input.name,
+                        value: input.value,
+                        type: input.type
+                    })
+                )
+            })
         """)
 
-        report["booking_candidates"] = find_candidates(
-            report["links"]
+        print("预约表单：")
+        print(json.dumps(form_data, ensure_ascii=False, indent=2))
+
+        print("3. 通过官网表单提交预约请求")
+
+        submit_button = reservation_form.locator(
+            'input[type="submit"]'
         )
 
-        print("3. 预约相关链接")
+        with page.expect_popup(timeout=30000) as popup_info:
+            submit_button.click()
+
+        reservation_page = popup_info.value
+
+        reservation_page.wait_for_load_state(
+            "domcontentloaded",
+            timeout=60000
+        )
+        reservation_page.wait_for_timeout(3000)
+
+        report["reservation_url"] = reservation_page.url
+        report["page_title"] = reservation_page.title()
+
+        print("预约页面：", reservation_page.url)
+        print("页面标题：", reservation_page.title())
+
+        print("4. 读取 grand 全部选项")
+
+        grand = reservation_page.locator(
+            'select[name="grand"]'
+        )
+
+        if grand.count() > 0:
+            report["grand_options"] = grand.locator(
+                "option"
+            ).evaluate_all("""
+                options => options.map(option => ({
+                    value: option.value,
+                    text: option.textContent.trim(),
+                    selected: option.selected
+                }))
+            """)
+        else:
+            report["errors"].append(
+                "预约页面没有找到 select[name='grand']"
+            )
+
+        print("GRAND_OPTIONS:")
         print(json.dumps(
-            report["booking_candidates"],
+            report["grand_options"],
             ensure_ascii=False,
             indent=2
         ))
 
-        print("4. 读取按钮")
+        print("5. 读取页面其他下拉选项")
 
-        report["buttons"] = page.locator(
-            "button, input[type=button], input[type=submit]"
+        report["selects"] = reservation_page.locator(
+            "select"
         ).evaluate_all("""
-            elements => elements.map(e => ({
-                text: (e.innerText || e.value || "").trim(),
-                type: e.type,
-                name: e.name,
-                onclick: e.getAttribute("onclick")
+            selects => selects.map(select => ({
+                name: select.name,
+                value: select.value,
+                options: Array.from(select.options).map(option => ({
+                    value: option.value,
+                    text: option.textContent.trim()
+                }))
             }))
         """)
 
-        print("5. 读取表单")
+        print("6. 读取页面表单")
 
-        report["forms"] = page.locator("form").evaluate_all("""
-            elements => elements.map(f => ({
-                action: f.action,
-                method: f.method,
-                html: f.outerHTML.slice(0, 3000)
-            }))
-        """)
-
-        print("6. 读取 iframe")
-
-        report["iframes"] = page.locator("iframe").evaluate_all("""
-            elements => elements.map(f => ({
-                src: f.src,
-                title: f.title
-            }))
-        """)
-
-        print("7. 读取 JavaScript 文件")
-
-        report["scripts"] = page.locator(
-            "script[src]"
+        report["forms"] = reservation_page.locator(
+            "form"
         ).evaluate_all("""
-            elements => elements.map(s => s.src)
+            forms => forms.map(form => ({
+                action: form.action,
+                method: form.method,
+                inputs: Array.from(
+                    form.querySelectorAll("input, select")
+                ).map(input => ({
+                    name: input.name,
+                    type: input.type,
+                    value: input.value
+                }))
+            }))
         """)
 
-        print("8. 检查官网其他页面")
+        print("7. 读取页面文字")
 
-        for path in [
-            "guide.html",
-            "sisetu.html",
-            "news.cgi"
-        ]:
-            try:
-                test_page = browser.new_page(locale="ja-JP")
+        report["page_text"] = reservation_page.locator(
+            "body"
+        ).inner_text()[:12000]
 
-                test_page.goto(
-                    BASE_URL + path,
-                    wait_until="domcontentloaded",
-                    timeout=30000
-                )
+        print("页面内容：")
+        print(report["page_text"][:5000])
 
-                test_page.wait_for_timeout(1000)
-
-                found = test_page.locator("a").evaluate_all("""
-                    elements => elements.map(a => ({
-                        text: (a.innerText || a.textContent || "").trim(),
-                        href: a.href,
-                        onclick: a.getAttribute("onclick")
-                    }))
-                """)
-
-                matches = find_candidates(found)
-
-                report["other_page_candidates"][path] = matches
-
-                print(
-                    path,
-                    json.dumps(matches, ensure_ascii=False)
-                )
-
-                test_page.close()
-
-            except Exception as e:
-                report["errors"].append(
-                    path + ": " + repr(e)
-                )
-
-        report["final_url"] = page.url
-        report["page_title"] = page.title()
-
-        print("入口定位测试完成")
+        print("诊断完成")
 
     except Exception as e:
         report["errors"].append(repr(e))
-        print("测试错误：", repr(e))
+        print("发生错误：", repr(e))
 
     finally:
-        with open(
-            "artifacts/report.json",
-            "w",
-            encoding="utf-8"
-        ) as f:
-            json.dump(
-                report,
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
-
+        save_report()
         print("报告已保存：artifacts/report.json")
         browser.close()
