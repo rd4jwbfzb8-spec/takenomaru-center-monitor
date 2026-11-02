@@ -11,25 +11,39 @@ from playwright.sync_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+
 # ============================================================
-# 竹之丸地区中心：普通工作日预约表诊断
+# 竹之丸地区中心：单日日期查询诊断
+#
 # 测试日期：2026-11-04
-# 只读取网页，不发送 ntfy，不读取或更新 state.json
+#
+# 只读取网页：
+# - 不发送 ntfy
+# - 不读取 state.json
+# - 不更新 state.json
+# - 不进行预约
 # ============================================================
 
 OFFICIAL_URL = "https://www.nakakumin.com/takenomaruchikusen/"
+
 TEST_DATE = "2026-11-04"
 TEST_MONTH = "202611"
 
 REPORT_DIR = Path("artifacts")
-REPORT_DIR.mkdir(exist_ok=True)
-
 REPORT_FILE = REPORT_DIR / "weekday_diagnostic_report.json"
 
+JST = ZoneInfo("Asia/Tokyo")
+
+FAILURE_DIAGNOSTICS = {}
+
+
+# ============================================================
+# 基础工具
+# ============================================================
 
 def log(message):
-    now = datetime.now(ZoneInfo("Asia/Tokyo"))
-    print(f"[{now:%Y-%m-%d %H:%M:%S}] {message}", flush=True)
+    now = datetime.now(JST).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] {message}", flush=True)
 
 
 def wait_page(page):
@@ -44,52 +58,77 @@ def wait_page(page):
     page.wait_for_timeout(1500)
 
 
-def save_failure_page(page, prefix):
-    """出错时保存当前页面，便于定位问题。"""
+def save_page_files(page, prefix):
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+    html_path = REPORT_DIR / f"{prefix}.html"
+    screenshot_path = REPORT_DIR / f"{prefix}.png"
 
     try:
-        REPORT_DIR.mkdir(exist_ok=True)
-
-        html_path = REPORT_DIR / f"{prefix}_failure.html"
         html_path.write_text(
             page.content(),
             encoding="utf-8"
         )
+        log(f"已保存页面HTML：{html_path}")
+    except Exception as e:
+        log(f"保存HTML失败：{e}")
 
-        screenshot_path = REPORT_DIR / f"{prefix}_failure.png"
+    try:
         page.screenshot(
             path=str(screenshot_path),
             full_page=True
         )
-
-        log(f"失败页面 HTML：{html_path}")
-        log(f"失败页面截图：{screenshot_path}")
-
-        return {
-            "url": page.url,
-            "title": page.title(),
-            "body_text": page.locator("body").inner_text()[:8000],
-            "html_file": str(html_path),
-            "screenshot_file": str(screenshot_path)
-        }
-
+        log(f"已保存页面截图：{screenshot_path}")
     except Exception as e:
-        return {"save_error": str(e)}
+        log(f"保存截图失败：{e}")
 
+    return {
+        "html_file": str(html_path),
+        "screenshot_file": str(screenshot_path),
+    }
+
+
+def get_page_info(page):
+    try:
+        body_text = page.locator("body").inner_text(
+            timeout=5000
+        )
+    except Exception as e:
+        body_text = f"读取正文失败：{e}"
+
+    try:
+        caption = page.locator(
+            "table.table_base caption"
+        ).first.inner_text(timeout=3000)
+    except Exception:
+        caption = ""
+
+    try:
+        html_length = len(page.content())
+    except Exception:
+        html_length = 0
+
+    return {
+        "url": page.url,
+        "title": page.title(),
+        "caption": caption,
+        "body_text_preview": body_text[:3000],
+        "html_length": html_length,
+        "table_count": page.locator(
+            "table.table_base"
+        ).count(),
+    }
+
+
+# ============================================================
+# 1. 进入竹之丸地区中心预约系统
+# ============================================================
 
 def enter_reservation(browser):
-    """
-    从中心官网进入预约系统。
-    保留官网表单、弹窗和设施选择流程。
-    """
-
-    context = browser.new_context(
-        viewport={"width": 1440, "height": 1000}
-    )
-
-    page = context.new_page()
 
     log("1. 打开竹之丸地区中心官网")
+
+    page = browser.new_page()
 
     success = False
 
@@ -97,19 +136,11 @@ def enter_reservation(browser):
         try:
             log(f"官网连接尝试：{attempt}/3")
 
-            response = page.goto(
+            page.goto(
                 OFFICIAL_URL,
                 wait_until="commit",
                 timeout=45000
             )
-
-            wait_page(page)
-
-            log(f"官网页面：{page.url}")
-            log(f"页面标题：{page.title()}")
-
-            if response:
-                log(f"官网 HTTP 状态：{response.status}")
 
             success = True
             break
@@ -117,92 +148,109 @@ def enter_reservation(browser):
         except Exception as e:
             log(f"官网连接失败：{e}")
 
-            if attempt == 3:
-                raise
-
-            page.wait_for_timeout(3000)
+            if attempt < 3:
+                page.wait_for_timeout(3000)
 
     if not success:
-        raise RuntimeError("无法打开竹之丸地区中心官网")
+        raise RuntimeError("连续3次无法打开竹之丸官网")
 
-    log("2. 查找官网预约系统入口")
+    wait_page(page)
 
-    forms = page.locator("form").evaluate_all("""
-        forms => forms.map((form, index) => ({
-            index: index,
-            action: form.getAttribute("action"),
-            target: form.getAttribute("target"),
-            html: form.outerHTML.slice(0, 3000)
-        }))
-    """)
+    log(f"官网页面：{page.url}")
+    log(f"官网标题：{page.title()}")
 
-    target_form = None
+    # 找到 action 指向 VisitorLogin.php 的官方表单
+    form_index = page.locator("form").evaluate_all(
+        """
+        forms => forms.findIndex(form =>
+            (form.getAttribute("action") || "")
+                .includes("VisitorLogin.php")
+        )
+        """
+    )
 
-    for item in forms:
-        action = item.get("action") or ""
-
-        if "VisitorLogin.php" in action:
-            target_form = item
-            break
-
-    if not target_form:
+    if form_index < 0:
+        save_page_files(page, "official_form_not_found")
         raise RuntimeError(
-            "官网没有找到 VisitorLogin.php 预约入口表单"
+            "官网没有找到提交到 VisitorLogin.php 的表单"
         )
 
-    log("找到官网预约入口表单")
+    official_form = page.locator("form").nth(form_index)
 
-    form_locator = page.locator(
-        "form[action*='VisitorLogin.php']"
-    ).first
-
-    hidden_values = form_locator.evaluate("""
+    form_info = official_form.evaluate(
+        """
         form => {
-            const result = {};
-            form.querySelectorAll("input").forEach(input => {
-                if (input.name) {
-                    result[input.name] = input.value;
-                }
+            const values = {};
+
+            form.querySelectorAll(
+                'input[type="hidden"]'
+            ).forEach(input => {
+                values[input.name] = input.value;
             });
-            return result;
+
+            return {
+                action: form.action,
+                method: form.method,
+                target: form.target,
+                hidden_values: values
+            };
         }
-    """)
+        """
+    )
 
-    log(f"官网表单隐藏参数：{hidden_values}")
+    log(f"官网表单信息：{json.dumps(form_info, ensure_ascii=False)}")
 
-    if (
-        hidden_values.get("mn") != "6"
-        or hidden_values.get("lc") != "xnxqxcaqri"
-        or hidden_values.get("gr") != "1"
-    ):
+    hidden = form_info.get("hidden_values", {})
+
+    if hidden.get("mn") != "6":
+        raise RuntimeError("官网表单参数 mn 不符合预期")
+
+    if hidden.get("lc") != "xnxqxcaqri":
+        raise RuntimeError("官网表单参数 lc 不符合预期")
+
+    if hidden.get("gr") != "1":
+        raise RuntimeError("官网表单参数 gr 不符合预期")
+
+    # 必须通过官网表单提交并打开预约系统弹窗
+    log("2. 提交官网预约入口")
+
+    try:
+        with page.expect_popup(timeout=20000) as popup_info:
+            official_form.evaluate(
+                "form => form.submit()"
+            )
+
+        reservation_page = popup_info.value
+
+    except PlaywrightTimeoutError:
+        save_page_files(page, "official_popup_failed")
         raise RuntimeError(
-            "官网预约入口参数与已确认参数不一致，停止运行"
+            "提交官网表单后没有检测到预约系统弹窗"
         )
 
-    log("3. 通过官网表单打开预约系统")
-
-    with page.expect_popup(timeout=20000) as popup_info:
-        form_locator.evaluate("""
-            form => form.submit()
-        """)
-
-    reservation_page = popup_info.value
     wait_page(reservation_page)
 
     log(f"预约入口页面：{reservation_page.url}")
     log(f"预约入口标题：{reservation_page.title()}")
 
-    log("4. 选择空き状況からみる")
+    # 选择空き状況からみる
+    log("3. 点击空き状況からみる")
 
-    reservation_page.locator(
+    authority = reservation_page.locator(
         'input[name="authority"][value="空き状況からみる"]'
-    ).click()
+    )
+
+    authority.wait_for(
+        state="visible",
+        timeout=20000
+    )
+
+    authority.click()
 
     wait_page(reservation_page)
 
-    log(f"当前页面：{reservation_page.url}")
-
-    log("5. 选择竹之丸地区中心体育室")
+    # 选择竹之丸地区中心体育室
+    log("4. 选择竹之丸地区中心（体育室）")
 
     facility_select = reservation_page.locator(
         'select[name="grand"]'
@@ -215,85 +263,62 @@ def enter_reservation(browser):
 
     facility_select.select_option("4")
 
-    # 关键修正：
-    # 不再使用 document.querySelector("form") 获取第一个表单。
-    # 而是从 grand 设施选择框取得它真正所属的表单。
-    form_info = facility_select.evaluate("""
+    form_info = facility_select.evaluate(
+        """
         select => {
             const form = select.form;
 
-            if (!form) {
-                return {
-                    found: false,
-                    error: "设施选择框没有所属表单"
-                };
-            }
-
-            const submitters = Array.from(
-                form.querySelectorAll(
-                    'input[type="submit"], input[type="image"], button[type="submit"], button:not([type])'
-                )
-            );
-
             return {
-                found: true,
-                action: form.getAttribute("action"),
-                method: form.getAttribute("method"),
-                selectedValue: select.value,
-                selectedText:
-                    select.options[select.selectedIndex]?.text || "",
-                submitters: submitters.map(button => ({
-                    tag: button.tagName,
-                    type: button.type,
-                    name: button.name,
-                    value: button.value,
-                    text: button.innerText || "",
-                    html: button.outerHTML
-                })),
-                formHtml: form.outerHTML.slice(0, 6000)
+                form_exists: !!form,
+                action: form ? form.action : null,
+                method: form ? form.method : null,
+                submitters: form
+                    ? Array.from(
+                        form.querySelectorAll(
+                            'input[type="submit"], input[type="image"], button'
+                        )
+                    ).map(button => ({
+                        type: button.type,
+                        name: button.name,
+                        value: button.value
+                    }))
+                    : []
             };
         }
-    """)
-
-    log(f"设施表单信息：{form_info}")
-
-    if not form_info.get("found"):
-        raise RuntimeError(
-            "找不到 grand 设施选择框所属表单"
-        )
-
-    if form_info.get("selectedValue") != "4":
-        raise RuntimeError(
-            "体育室设施选择失败，当前值不是4"
-        )
-
-    log("确认已选择竹之丸地区中心体育室，准备提交")
-
-    # 优先点击设施表单自己的提交按钮。
-    # 如果没有提交按钮，再对这个表单调用 requestSubmit。
-    submitter_locator = facility_select.locator(
-        "xpath=.."
+        """
     )
 
-    # 直接在设施选择框所属表单内执行提交，
-    # 避免误提交页面上的其他 form。
+    log(
+        "设施表单信息："
+        + json.dumps(form_info, ensure_ascii=False)
+    )
+
+    # 注意：必须提交 grand 这个 select 所属的表单。
+    # 不使用 document.querySelector("form")，
+    # 避免提交错误的表单。
+    log("5. 提交设施选择")
+
     try:
         with reservation_page.expect_navigation(
             wait_until="domcontentloaded",
             timeout=20000
         ):
-            facility_select.evaluate("""
+            facility_select.evaluate(
+                """
                 select => {
                     const form = select.form;
 
                     if (!form) {
                         throw new Error(
-                            "设施选择框没有所属表单"
+                            "grand select 没有所属表单"
                         );
                     }
 
                     const submitter = form.querySelector(
-                        'input[type="submit"], input[type="image"], button[type="submit"], button:not([type])'
+                        'input[type="submit"], ' +
+                        'input[type="image"], ' +
+                        'button[type="submit"], ' +
+                        'button:not([type])'
                     );
 
                     if (submitter) {
@@ -302,14 +327,19 @@ def enter_reservation(browser):
                         form.requestSubmit();
                     }
                 }
-            """)
-
-        log("设施表单提交后检测到页面导航")
+                """
+            )
 
     except PlaywrightTimeoutError:
-        log("设施提交后未检测到标准导航，继续检查页面")
+        log(
+            "设施提交后未检测到标准导航，继续检查页面"
+        )
 
-    # 等待预约状况页面的月份选择框出现。
+    wait_page(reservation_page)
+
+    # 等待预约月份选择框出现
+    log("6. 等待预约月份选择框")
+
     try:
         reservation_page.locator(
             'select[name="Ym_select"]'
@@ -318,180 +348,321 @@ def enter_reservation(browser):
             timeout=30000
         )
 
-    except PlaywrightTimeoutError:
-        failure_info = save_failure_page(
+    except Exception:
+        save_page_files(
             reservation_page,
-            "facility_submit"
+            "facility_select_failed"
         )
-
-        log(f"提交后的页面诊断：{failure_info}")
 
         raise RuntimeError(
-            "设施表单提交后没有出现月份选择框。"
-            f"当前 URL：{reservation_page.url}；"
-            f"页面标题：{reservation_page.title()}"
+            "设施提交后没有出现预约月份选择框"
         )
 
-    wait_page(reservation_page)
+    log("预约系统进入成功")
+    log(f"预约页面：{reservation_page.url}")
+    log(f"预约页面标题：{reservation_page.title()}")
 
-    log(f"体育室预约页面：{reservation_page.url}")
-    log(f"页面标题：{reservation_page.title()}")
+    return reservation_page
 
-    return context, reservation_page
 
+# ============================================================
+# 2. 读取可查询月份
+# ============================================================
 
 def get_months(page):
-    return page.locator(
-        'select[name="Ym_select"] option'
-    ).evaluate_all("""
+
+    month_select = page.locator(
+        'select[name="Ym_select"]'
+    )
+
+    months = month_select.locator("option").evaluate_all(
+        """
         options => options.map(option => ({
             value: option.value,
-            text: option.textContent.trim()
-        })).filter(item => item.value)
-    """)
+            text: option.innerText.trim()
+        })).filter(option => option.value)
+        """
+    )
 
+    return months
+
+
+# ============================================================
+# 3. 切换查询月份
+# ============================================================
 
 def switch_month(page, month):
+
     log(f"切换查询月份：{month}")
 
-    page.evaluate("""
+    page.evaluate(
+        """
         month => {
             if (typeof SubmitFormM === "function") {
                 SubmitFormM(month);
-            } else {
-                const select =
-                    document.querySelector(
-                        'select[name="Ym_select"]'
-                    );
-
-                if (!select) {
-                    throw new Error("找不到月份选择框");
-                }
-
-                select.value = month;
-
-                const form = select.form;
-
-                if (form) {
-                    form.requestSubmit();
-                }
+                return;
             }
-        }
-    """, month)
 
-    page.wait_for_function(
-        """month => {
-            const select =
-                document.querySelector(
-                    'select[name="Ym_select"]'
+            const select = document.querySelector(
+                'select[name="Ym_select"]'
+            );
+
+            if (!select) {
+                throw new Error(
+                    "找不到 Ym_select 月份选择框"
                 );
+            }
 
-            return select && select.value === month;
-        }""",
-        arg=month,
-        timeout=20000
+            select.value = month;
+
+            if (!select.form) {
+                throw new Error(
+                    "月份选择框没有所属表单"
+                );
+            }
+
+            select.form.requestSubmit();
+        }
+        """,
+        month
     )
 
-    page.wait_for_timeout(1500)
+    page.wait_for_function(
+        """
+        month => {
+            const select = document.querySelector(
+                'select[name="Ym_select"]'
+            );
 
+            return select && select.value === month;
+        }
+        """,
+        arg=month,
+        timeout=25000
+    )
+
+    wait_page(page)
+
+    log(f"月份切换完成：{month}")
+
+
+# ============================================================
+# 4. 读取该月份日历中的日期
+# ============================================================
 
 def get_dates(page):
+
     html = page.content()
 
-    dates = sorted(set(re.findall(
-        r"SubmitFormD\(['\"](\d{4}-\d{2}-\d{2})['\"]\)",
+    dates = re.findall(
+        r"""SubmitFormD\(['"](\d{4}-\d{2}-\d{2})['"]\)""",
         html
-    )))
+    )
+
+    # 去重，同时保留原顺序
+    dates = list(dict.fromkeys(dates))
 
     return dates
 
 
+# ============================================================
+# 5. 切换具体日期
+#
+# 重点修改：
+# 不再点击日历 input 按钮。
+# 直接调用预约网页自己的 SubmitFormD(date)。
+# ============================================================
+
 def switch_date(page, date_text):
+
+    global FAILURE_DIAGNOSTICS
+
     log(f"准备查询日期：{date_text}")
 
-    selector = f'input[onclick*="{date_text}"]'
+    before_info = get_page_info(page)
 
-    date_button = page.locator(selector).first
+    log(
+        "切换前预约表标题："
+        + before_info.get("caption", "")
+    )
 
-    if date_button.count() == 0:
-        raise RuntimeError(
-            f"日历中没有找到日期按钮：{date_text}"
+    # 确认页面本身存在 SubmitFormD 函数
+    function_exists = page.evaluate(
+        "() => typeof SubmitFormD === 'function'"
+    )
+
+    if not function_exists:
+        FAILURE_DIAGNOSTICS = {
+            "step": "check_SubmitFormD",
+            "date": date_text,
+            "before": before_info,
+            "error": "预约页面没有 SubmitFormD 函数",
+        }
+
+        save_page_files(
+            page,
+            "date_switch_function_missing"
         )
 
-    before_caption = page.locator(
-        "table.table_base caption"
-    ).first.inner_text()
+        raise RuntimeError(
+            "预约页面没有找到 SubmitFormD 函数"
+        )
 
-    log(f"切换前预约表标题：{before_caption.strip()}")
+    log("已确认页面存在 SubmitFormD 函数")
 
+    # 直接调用页面自己的日期切换函数
     try:
         with page.expect_navigation(
             wait_until="domcontentloaded",
             timeout=15000
         ):
-            date_button.click()
+            page.evaluate(
+                """
+                dateText => {
+                    SubmitFormD(dateText);
+                }
+                """,
+                date_text
+            )
 
-        log("点击后检测到整页导航")
+        log("调用 SubmitFormD 后检测到整页导航")
 
     except PlaywrightTimeoutError:
-        log("点击后没有检测到标准导航，继续检查页面")
+        log(
+            "调用 SubmitFormD 后未检测到标准导航，"
+            "继续等待预约表更新"
+        )
 
-    page.wait_for_function(
-        """dateText => {
-            const caption =
-                document.querySelector(
+    except Exception as e:
+        log(f"调用 SubmitFormD 时出现异常：{e}")
+
+        FAILURE_DIAGNOSTICS = {
+            "step": "call_SubmitFormD",
+            "date": date_text,
+            "before": before_info,
+            "error": str(e),
+        }
+
+        save_page_files(
+            page,
+            "date_switch_call_error"
+        )
+
+        raise
+
+    # 等待预约表标题真正出现目标日期
+    try:
+        page.wait_for_function(
+            """
+            dateText => {
+                const caption = document.querySelector(
                     "table.table_base caption"
                 );
 
-            return caption &&
-                   caption.innerText.includes(dateText);
-        }""",
-        arg=date_text,
-        timeout=25000
+                return caption &&
+                    caption.innerText.includes(dateText);
+            }
+            """,
+            arg=date_text,
+            timeout=25000
+        )
+
+    except PlaywrightTimeoutError:
+
+        log("等待目标日期预约表超时")
+
+        after_info = get_page_info(page)
+
+        files = save_page_files(
+            page,
+            "date_switch_failure"
+        )
+
+        FAILURE_DIAGNOSTICS = {
+            "step": "wait_target_date_caption",
+            "target_date": date_text,
+            "before": before_info,
+            "after": after_info,
+            "saved_files": files,
+            "error": (
+                "25秒内没有等到预约表标题出现目标日期"
+            ),
+        }
+
+        log(
+            "日期切换失败后的页面信息："
+            + json.dumps(
+                FAILURE_DIAGNOSTICS,
+                ensure_ascii=False
+            )
+        )
+
+        raise RuntimeError(
+            "日期切换后预约表没有显示目标日期。"
+            "已保存失败页面HTML和截图。"
+        )
+
+    # 日期切换成功
+    wait_page(page)
+
+    after_info = get_page_info(page)
+
+    log(
+        "日期切换成功，预约表标题："
+        + after_info.get("caption", "")
     )
 
-    page.wait_for_timeout(1500)
+    return {
+        "success": True,
+        "target_date": date_text,
+        "before": before_info,
+        "after": after_info,
+    }
 
-    log("日期切换成功")
 
-    caption = page.locator(
-        "table.table_base caption"
-    ).first.inner_text()
-
-    log(f"切换后预约表标题：{caption.strip()}")
-
+# ============================================================
+# 6. 收集页面图片信息
+# ============================================================
 
 def collect_page_images(page):
-    return page.locator("body").evaluate("""
-        body => {
-            return Array.from(body.querySelectorAll("img"))
-                .map(img => ({
-                    src: img.getAttribute("src"),
-                    alt: img.getAttribute("alt"),
-                    title: img.getAttribute("title"),
-                    parent_text:
-                        (img.parentElement?.innerText || "")
-                            .trim()
-                            .slice(0, 500),
-                    parent_html:
-                        (img.parentElement?.outerHTML || "")
-                            .slice(0, 2000),
-                    grandparent_text:
-                        (img.parentElement?.parentElement?.innerText || "")
-                            .trim()
-                            .slice(0, 500),
-                    grandparent_html:
-                        (img.parentElement?.parentElement?.outerHTML || "")
-                            .slice(0, 4000)
-                }));
-        }
-    """)
 
+    return page.locator("img").evaluate_all(
+        """
+        images => images.map(img => ({
+            src: img.getAttribute("src"),
+            alt: img.getAttribute("alt"),
+            title: img.getAttribute("title"),
+            parent_text: img.parentElement
+                ? img.parentElement.innerText
+                : "",
+            parent_html: img.parentElement
+                ? img.parentElement.outerHTML
+                : "",
+            grandparent_text: img.parentElement &&
+                img.parentElement.parentElement
+                ? img.parentElement.parentElement.innerText
+                : "",
+            grandparent_html: img.parentElement &&
+                img.parentElement.parentElement
+                ? img.parentElement.parentElement.outerHTML
+                : ""
+        }))
+        """
+    )
+
+
+# ============================================================
+# 7. 收集状态说明/图例候选内容
+# ============================================================
 
 def collect_legend_candidates(page):
-    return page.locator("body").evaluate("""
-        body => {
-            const terms = [
+
+    return page.locator(
+        "td, th, span, div, li"
+    ).evaluate_all(
+        """
+        elements => {
+            const keywords = [
                 "選択可能",
                 "空き",
                 "予約済み",
@@ -501,208 +672,217 @@ def collect_legend_candidates(page):
                 "保守"
             ];
 
-            const elements = Array.from(
-                body.querySelectorAll("td, th, span, div, li")
-            );
-
-            const results = [];
-            const seen = new Set();
-
-            for (const el of elements) {
-                const text = (el.innerText || "").trim();
-
-                if (!text || text.length > 500) {
-                    continue;
-                }
-
-                if (!terms.some(term => text.includes(term))) {
-                    continue;
-                }
-
-                const parent = el.parentElement;
-                const html = parent
-                    ? parent.outerHTML
-                    : el.outerHTML;
-
-                if (seen.has(html)) {
-                    continue;
-                }
-
-                seen.add(html);
-
-                results.push({
-                    tag: el.tagName,
-                    className:
-                        typeof el.className === "string"
-                            ? el.className
-                            : "",
-                    text: text,
-                    html: html.slice(0, 5000)
-                });
-
-                if (results.length >= 40) {
-                    break;
-                }
-            }
-
-            return results;
+            return elements
+                .map(element => ({
+                    tag: element.tagName,
+                    text: (element.innerText || "").trim(),
+                    html: element.outerHTML,
+                    parent_html: element.parentElement
+                        ? element.parentElement.outerHTML
+                        : ""
+                }))
+                .filter(item =>
+                    item.text &&
+                    item.text.length < 500 &&
+                    keywords.some(keyword =>
+                        item.text.includes(keyword)
+                    )
+                );
         }
-    """)
+        """
+    )
 
+
+# ============================================================
+# 8. 单日诊断
+# ============================================================
 
 def diagnose(page):
-    report = {
-        "run_time": datetime.now(
-            ZoneInfo("Asia/Tokyo")
-        ).isoformat(),
-        "purpose": (
-            "普通工作日预约表及状态图例诊断。"
-            "不发送通知，不更新状态。"
-        ),
-        "test_date": TEST_DATE,
-        "test_month": TEST_MONTH
-    }
 
-    log("6. 检查可查询月份")
+    log("开始单日预约表诊断")
 
+    # 读取可查询月份
     months = get_months(page)
 
-    report["months"] = months
+    log(
+        "可查询月份："
+        + json.dumps(months, ensure_ascii=False)
+    )
 
-    log(f"可查询月份：{months}")
-
-    available_months = [
+    month_values = [
         item["value"] for item in months
     ]
 
-    if TEST_MONTH not in available_months:
+    if TEST_MONTH not in month_values:
         raise RuntimeError(
-            f"当前预约页面没有 {TEST_MONTH} 月份"
+            f"预约系统没有提供测试月份：{TEST_MONTH}"
         )
 
+    # 切换到2026年11月
     log("7. 切换到2026年11月")
 
     switch_month(page, TEST_MONTH)
 
+    # 读取日历日期
     dates = get_dates(page)
-
-    report["november_dates"] = dates
 
     log(f"11月日历日期数量：{len(dates)}")
 
-    if TEST_DATE not in dates:
-        raise RuntimeError(
-            f"日历中没有找到测试日期 {TEST_DATE}"
+    if not dates:
+        save_page_files(
+            page,
+            "calendar_dates_not_found"
         )
 
-    log("8. 切换到11月4日")
+        raise RuntimeError(
+            "没有从11月日历中读取到日期"
+        )
 
-    switch_date(page, TEST_DATE)
+    if TEST_DATE not in dates:
+        raise RuntimeError(
+            f"日历中没有找到测试日期：{TEST_DATE}"
+        )
 
-    full_html = page.content()
+    log(f"8. 切换到{TEST_DATE}")
 
-    html_file = REPORT_DIR / "weekday_20261104.html"
+    date_result = switch_date(
+        page,
+        TEST_DATE
+    )
+
+    # 读取最终预约表
+    log("9. 收集目标日期预约表")
+
+    final_html = page.content()
+
+    try:
+        table_html = page.locator(
+            "table.table_base"
+        ).first.evaluate(
+            "table => table.outerHTML"
+        )
+    except Exception:
+        table_html = ""
+
+    try:
+        body_text = page.locator("body").inner_text()
+    except Exception:
+        body_text = ""
+
+    page_images = collect_page_images(page)
+
+    legend_candidates = collect_legend_candidates(page)
+
+    # 保存目标日期完整HTML
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    html_file = REPORT_DIR / "target_date_full_page.html"
+
     html_file.write_text(
-        full_html,
+        final_html,
         encoding="utf-8"
     )
 
-    log(f"完整网页 HTML 已保存：{html_file}")
-
-    table_html = page.locator(
-        "table.table_base"
-    ).first.evaluate(
-        "element => element.outerHTML"
-    )
-
-    table_file = REPORT_DIR / "weekday_table_20261104.html"
-    table_file.write_text(
-        table_html,
-        encoding="utf-8"
-    )
-
-    report["table_html"] = table_html
-
-    log(f"预约表 HTML 已保存：{table_file}")
-
-    report["page_images"] = collect_page_images(page)
-
-    log(
-        "页面图片数量："
-        f"{len(report['page_images'])}"
-    )
-
-    report["legend_candidates"] = (
-        collect_legend_candidates(page)
-    )
-
-    log(
-        "状态图例候选区域数量："
-        f"{len(report['legend_candidates'])}"
-    )
-
-    screenshot_file = (
-        REPORT_DIR / "weekday_20261104.png"
-    )
+    screenshot_file = REPORT_DIR / "target_date_screenshot.png"
 
     page.screenshot(
         path=str(screenshot_file),
         full_page=True
     )
 
-    log(f"页面截图已保存：{screenshot_file}")
+    report = {
+        "run_time": datetime.now(JST).isoformat(),
+        "today": datetime.now(JST).date().isoformat(),
+        "purpose": (
+            "单日日期查询诊断，附带预约表完整HTML，"
+            "不发送通知，不读取或更新state.json"
+        ),
+        "months": month_values,
+        "month_options": months,
+        "date_count": len(dates),
+        "test_date": TEST_DATE,
+        "date_switch": date_result,
+        "final_page": get_page_info(page),
+        "body_text_preview": body_text[:5000],
+        "table_html": table_html,
+        "page_images": page_images,
+        "legend_candidates": legend_candidates,
+        "html_file": str(html_file),
+        "screenshot_file": str(screenshot_file),
+    }
 
-    report["page_url"] = page.url
-    report["page_title"] = page.title()
-    report["table_count"] = page.locator(
-        "table.table_base"
-    ).count()
-
-    report["body_text"] = page.locator(
-        "body"
-    ).inner_text()[:12000]
-
-    report["html_length"] = len(full_html)
+    log("单日诊断完成")
 
     return report
 
 
+# ============================================================
+# 9. 主程序
+# ============================================================
+
 def main():
-    report = {}
+
+    REPORT_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    report = {
+        "run_time": datetime.now(JST).isoformat(),
+        "today": datetime.now(JST).date().isoformat(),
+        "test_date": TEST_DATE,
+        "success": False,
+    }
+
+    browser = None
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
+
+        with sync_playwright() as playwright:
+
+            browser = playwright.chromium.launch(
                 headless=True
             )
 
-            context = None
+            page = enter_reservation(browser)
 
-            try:
-                context, page = enter_reservation(browser)
+            result = diagnose(page)
 
-                report = diagnose(page)
+            report.update(result)
+            report["success"] = True
 
-                report["success"] = True
-
-            finally:
-                if context:
-                    context.close()
-
-                browser.close()
+            browser.close()
+            browser = None
 
     except Exception as e:
+
         report["success"] = False
         report["error"] = str(e)
         report["traceback"] = traceback.format_exc()
 
+        if FAILURE_DIAGNOSTICS:
+            report["failure_diagnostics"] = (
+                FAILURE_DIAGNOSTICS
+            )
+
         log(f"诊断失败：{e}")
         log(traceback.format_exc())
 
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
     finally:
-        report["run_time"] = datetime.now(
-            ZoneInfo("Asia/Tokyo")
-        ).isoformat()
+
+        REPORT_DIR.mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
         REPORT_FILE.write_text(
             json.dumps(
@@ -713,18 +893,22 @@ def main():
             encoding="utf-8"
         )
 
-        log(f"诊断报告已保存：{REPORT_FILE}")
+        print("\n========== 诊断报告 ==========")
 
-        print("\n========== 诊断结果 ==========")
-        print(json.dumps(
-            report,
-            ensure_ascii=False,
-            indent=2
-        ))
-        print("========== 诊断结束 ==========")
+        print(
+            json.dumps(
+                report,
+                ensure_ascii=False,
+                indent=2
+            )
+        )
+
+        print("==============================")
+
+        log(f"报告已保存：{REPORT_FILE}")
 
     if not report.get("success"):
-        raise RuntimeError("竹之丸普通工作日诊断失败")
+        raise RuntimeError("诊断未成功，请查看上方错误和诊断报告")
 
 
 if __name__ == "__main__":
