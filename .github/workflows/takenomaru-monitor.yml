@@ -48,11 +48,11 @@ jobs:
           path: state.json
           key: takenomaru-state-${{ github.run_id }}
 
-      - name: Upload monitor report
+      - name: Upload diagnostic files
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: takenomaru-monitor-report
-          path: artifacts/report.json
-          if-no-files-found: ignore
+          name: takenomaru-diagnostics
+          path: artifacts/
+          if-no-files-found: warn
           retention-days: 7
