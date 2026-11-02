@@ -3,8 +3,6 @@ name: Takenomaru Availability Monitor
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
 
 concurrency:
   group: takenomaru-monitor
@@ -24,35 +22,154 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Restore previous availability state
-        uses: actions/cache/restore@v4
-        with:
-          path: state.json
-          key: takenomaru-state-${{ github.run_id }}
-          restore-keys: |
-            takenomaru-state-
-
       - name: Install Playwright
         run: |
           python -m pip install --upgrade pip
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Run Takenomaru monitor
+      - name: Run one-day date diagnostic
         run: python connect_test.py
 
-      - name: Save availability state
-        if: success()
-        uses: actions/cache/save@v4
-        with:
-          path: state.json
-          key: takenomaru-state-${{ github.run_id }}
-
-      - name: Upload diagnostic files
+      - name: Show diagnostic details in GitHub Summary
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: takenomaru-diagnostics
-          path: artifacts/
-          if-no-files-found: warn
-          retention-days: 7
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if not summary_path:
+              raise SystemExit("GITHUB_STEP_SUMMARY is not available")
+
+          out = []
+
+          def add(value=""):
+              out.append(str(value))
+
+          report_path = Path("artifacts/date_diagnostic_report.json")
+
+          add("# Takenomaru date diagnostic")
+          add("")
+
+          if report_path.exists():
+              try:
+                  report = json.loads(
+                      report_path.read_text(encoding="utf-8")
+                  )
+                  add("## Diagnostic report")
+                  add("```json")
+                  report_text = json.dumps(
+                      report,
+                      ensure_ascii=False,
+                      indent=2
+                  )
+                  add(report_text[:18000])
+
+                  if len(report_text) > 18000:
+                      add("... report truncated ...")
+
+                  add("```")
+              except Exception as exc:
+                  add(f"Could not read diagnostic report: {exc}")
+          else:
+              add("Diagnostic report was not created.")
+
+          for label, prefix in [
+              ("Before click", "before_"),
+              ("After click", "after_"),
+          ]:
+              matches = sorted(
+                  Path("artifacts").glob(prefix + "*.html")
+              )
+
+              add("")
+              add(f"## {label} HTML")
+
+              if not matches:
+                  add("HTML file not found.")
+                  continue
+
+              path = matches[0]
+              html = path.read_text(
+                  encoding="utf-8",
+                  errors="replace"
+              )
+
+              add(f"File: `{path}` ({len(html)} characters)")
+
+              terms = [
+                  "SubmitFormD",
+                  "table_base",
+                  "Ym_select",
+                  'name="c_v[]"',
+                  "name='c_v[]'",
+              ]
+
+              snippets = []
+              seen = set()
+
+              for term in terms:
+                  start = 0
+
+                  while True:
+                      pos = html.find(term, start)
+
+                      if pos < 0:
+                          break
+
+                      left = max(0, pos - 700)
+                      right = min(len(html), pos + 1800)
+                      key = (left, right)
+
+                      if key not in seen:
+                          snippets.append(html[left:right])
+                          seen.add(key)
+
+                      start = pos + len(term)
+
+                      if len(snippets) >= 8:
+                          break
+
+                  if len(snippets) >= 8:
+                      break
+
+              if snippets:
+                  add("Relevant HTML excerpts:")
+                  add("```html")
+
+                  excerpt_text = (
+                      "\n\n<!-- excerpt boundary -->\n\n"
+                  ).join(snippets)
+
+                  excerpt_text = excerpt_text.replace("```", "---")
+                  add(excerpt_text[:14000])
+
+                  if len(excerpt_text) > 14000:
+                      add("... HTML excerpts truncated ...")
+
+                  add("```")
+              else:
+                  add(
+                      "No matching form/table markers found. "
+                      "First 5000 characters:"
+                  )
+                  add("```html")
+                  add(html[:5000].replace("```", "---"))
+                  add("```")
+
+          add("")
+          add(
+              "Screenshots were saved in the runner under "
+              "`artifacts/`; this workflow does not require ZIP downloads."
+          )
+
+          Path(summary_path).write_text(
+              "\n".join(out) + "\n",
+              encoding="utf-8"
+          )
+
+          print("Diagnostic details written to GitHub Actions Summary.")
+          PY
