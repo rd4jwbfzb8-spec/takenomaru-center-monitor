@@ -1,0 +1,58 @@
+
+name: Takenomaru Availability Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+concurrency:
+  group: takenomaru-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore previous availability state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: takenomaru-state-${{ github.run_id }}
+          restore-keys: |
+            takenomaru-state-
+
+      - name: Install Playwright
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run Takenomaru monitor
+        run: python connect_test.py
+
+      - name: Save availability state
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: takenomaru-state-${{ github.run_id }}
+
+      - name: Upload monitor report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: takenomaru-monitor-report
+          path: artifacts/report.json
+          if-no-files-found: ignore
+          retention-days: 7
