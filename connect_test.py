@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import jpholiday
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -30,9 +31,7 @@ ROOMS = {
     "体育室（Ｃ）": "C",
 }
 
-# 页面只要出现这三个字，就判定休馆。
 CLOSED_DAY_KEYWORD = "休館日"
-
 MAX_DATES_PER_RUN = 120
 
 
@@ -473,7 +472,6 @@ def switch_date(page, date_text):
             )
 
     except PlaywrightTimeoutError:
-        # 页面可能通过脚本更新，不一定触发整页导航。
         pass
 
     try:
@@ -483,7 +481,6 @@ def switch_date(page, date_text):
                     ? document.body.innerText
                     : "";
 
-                // 只要出现「休館日」就算休馆。
                 if (body.includes("休館日")) {
                     return true;
                 }
@@ -502,8 +499,6 @@ def switch_date(page, date_text):
         )
 
     except PlaywrightTimeoutError:
-        # 等待超时后再次检查休馆关键词。
-        # 有休馆提示就直接跳过，不抛出异常。
         if is_closed_day(page):
             log(
                 f"{date_text} 页面出现「休館日」，"
@@ -536,8 +531,6 @@ def switch_date(page, date_text):
 
     page.wait_for_timeout(300)
 
-    # 无论休馆提示的完整句子是什么，
-    # 只要页面出现「休館日」就直接跳过。
     if is_closed_day(page):
         log(
             f"{date_text} 页面出现「休館日」，"
@@ -564,6 +557,100 @@ def switch_date(page, date_text):
 
     log(f"{date_text} 日期切换成功")
     return True
+
+
+# ============================================================
+# 根据星期和日本节假日决定监控时段
+#
+# 普通周一～周五：只监控 18:00～21:00
+# 星期六：全部4个时段
+# 星期日：全部3个时段
+# 周一～周五的日本节假日：全部3个时段
+# 星期六即使是节假日，也按照4个时段处理
+# ============================================================
+
+def get_target_slot_indexes(date_text, slots):
+    value = datetime.strptime(
+        date_text,
+        "%Y-%m-%d",
+    ).date()
+
+    weekday = value.weekday()
+    holiday_name = jpholiday.is_holiday_name(value)
+
+    # 星期六优先：即使是节假日，也按4个时段处理。
+    if weekday == 5:
+        if len(slots) != 4:
+            raise RuntimeError(
+                f"{date_text} 是星期六，"
+                f"预期4个时段，实际读取到 {len(slots)} 个：{slots}"
+            )
+
+        log(
+            f"{date_text} 星期六"
+            f"{'（同时为' + holiday_name + '）' if holiday_name else ''}"
+            "：监控全部4个时段"
+        )
+
+        return list(range(4))
+
+    # 星期日：全部3个时段。
+    if weekday == 6:
+        if len(slots) != 3:
+            raise RuntimeError(
+                f"{date_text} 是星期日，"
+                f"预期3个时段，实际读取到 {len(slots)} 个：{slots}"
+            )
+
+        log(
+            f"{date_text} 星期日：监控全部3个时段"
+        )
+
+        return list(range(3))
+
+    # 周一～周五的日本节假日：全部3个时段。
+    if holiday_name:
+        if len(slots) != 3:
+            raise RuntimeError(
+                f"{date_text} 是日本节假日（{holiday_name}），"
+                f"预期3个时段，实际读取到 {len(slots)} 个：{slots}"
+            )
+
+        log(
+            f"{date_text} 日本节假日（{holiday_name}）："
+            "监控全部3个时段"
+        )
+
+        return list(range(3))
+
+    # 普通工作日：只监控18:00～21:00。
+    if len(slots) != 4:
+        raise RuntimeError(
+            f"{date_text} 是普通工作日，"
+            f"预期4个原始时段，实际读取到 {len(slots)} 个：{slots}"
+        )
+
+    evening_indexes = [
+        index
+        for index, slot in enumerate(slots)
+        if (
+            "18:00" in slot
+            and "21:00" in slot
+        )
+    ]
+
+    if len(evening_indexes) != 1:
+        raise RuntimeError(
+            f"{date_text}：无法唯一识别18:00～21:00时段，"
+            f"实际时段：{slots}"
+        )
+
+    log(
+        f"{date_text} 普通工作日："
+        f"只监控 {slots[evening_indexes[0]]}"
+    )
+
+    return evening_indexes
 
 
 # ============================================================
@@ -624,6 +711,17 @@ def parse_day(page, date_text):
             f"{date_text}：时段数量或标题异常：{slots}"
         )
 
+    # 只保留当天规则要求的时段。
+    target_indexes = get_target_slot_indexes(
+        date_text,
+        slots,
+    )
+
+    target_slots = [
+        slots[index]
+        for index in target_indexes
+    ]
+
     found_rooms = set()
     result = {}
 
@@ -671,7 +769,11 @@ def parse_day(page, date_text):
                 f"格数={len(expanded_cells)}，时段数={len(slots)}"
             )
 
-        for slot, cell in zip(slots, expanded_cells):
+        # 只读取目标时段，其他时段完全不进入监控状态。
+        for slot_index in target_indexes:
+            slot = slots[slot_index]
+            cell = expanded_cells[slot_index]
+
             # checkbox 存在即可，disabled 也算空位。
             has_checkbox = (
                 cell.locator('input[type="checkbox"]').count() > 0
@@ -696,7 +798,7 @@ def parse_day(page, date_text):
             f"缺少：{missing}"
         )
 
-    expected_cells = len(ROOMS) * len(slots)
+    expected_cells = len(ROOMS) * len(target_slots)
 
     if len(result) != expected_cells:
         raise RuntimeError(
@@ -711,7 +813,9 @@ def parse_day(page, date_text):
     )
 
     log(
-        f"{date_text} 读取完成：A/B/C 共 {expected_cells} 格，"
+        f"{date_text} 读取完成："
+        f"监控时段 {target_slots}，"
+        f"A/B/C 共 {expected_cells} 格，"
         f"发现 checkbox 空位 {available_count} 格"
     )
 
@@ -884,6 +988,13 @@ def main():
         "run_time": datetime.now(JST).isoformat(),
         "today": today.isoformat(),
         "purpose": "竹之丸体育室 A/B/C checkbox 空位监控",
+        "monitor_rules": {
+            "weekday": "18:00-21:00 only",
+            "saturday": "all 4 slots",
+            "sunday": "all 3 slots",
+            "weekday_japanese_holiday": "all 3 slots",
+            "saturday_holiday": "all 4 slots",
+        },
         "months": [],
         "dates_found": 0,
         "dates_checked": 0,
@@ -985,7 +1096,6 @@ def main():
 
                 for date_text in dates:
 
-                    # 红色日期不点击，直接跳过。
                     if date_text in calendar_closed_dates:
                         report["dates_skipped"] += 1
 
@@ -1150,7 +1260,6 @@ def main():
                     log("本次监控运行完成")
 
             except Exception:
-                # 仍在 Playwright 上下文内，先保存现场。
                 if page is not None:
                     save_debug(
                         page,
