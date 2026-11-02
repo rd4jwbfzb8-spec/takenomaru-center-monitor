@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -324,13 +325,7 @@ def is_red_color(color):
 def get_dates(page):
     """
     读取日历日期和颜色。
-
     红色日期直接判定休馆。
-    返回格式：
-    {
-        "2026-11-13": True,
-        "2026-11-14": False
-    }
     """
 
     records = page.locator(
@@ -423,7 +418,6 @@ def japanese_date(date_text):
 
 # ============================================================
 # 休馆判断
-# 页面只要出现「休館日」就算休馆
 # ============================================================
 
 def is_closed_day(page):
@@ -440,8 +434,7 @@ def is_closed_day(page):
 
 # ============================================================
 # 切换日期
-#
-# True  = 正常预约日期
+# True = 正常预约日期
 # False = 休馆日
 # ============================================================
 
@@ -492,9 +485,7 @@ def switch_date(page, date_text):
                 return !!caption &&
                     caption.innerText.includes(args.expected);
             }""",
-            arg={
-                "expected": expected,
-            },
+            arg={"expected": expected},
             timeout=12000,
         )
 
@@ -561,12 +552,6 @@ def switch_date(page, date_text):
 
 # ============================================================
 # 根据星期和日本节假日决定监控时段
-#
-# 普通周一～周五：只监控 18:00～21:00
-# 星期六：全部4个时段
-# 星期日：全部3个时段
-# 周一～周五的日本节假日：全部3个时段
-# 星期六即使是节假日，也按照4个时段处理
 # ============================================================
 
 def get_target_slot_indexes(date_text, slots):
@@ -602,10 +587,7 @@ def get_target_slot_indexes(date_text, slots):
                 f"预期3个时段，实际读取到 {len(slots)} 个：{slots}"
             )
 
-        log(
-            f"{date_text} 星期日：监控全部3个时段"
-        )
-
+        log(f"{date_text} 星期日：监控全部3个时段")
         return list(range(3))
 
     # 周一～周五的日本节假日：全部3个时段。
@@ -633,10 +615,7 @@ def get_target_slot_indexes(date_text, slots):
     evening_indexes = [
         index
         for index, slot in enumerate(slots)
-        if (
-            "18:00" in slot
-            and "21:00" in slot
-        )
+        if re.search(r"18:00.*21:00", slot)
     ]
 
     if len(evening_indexes) != 1:
@@ -654,16 +633,27 @@ def get_target_slot_indexes(date_text, slots):
 
 
 # ============================================================
-# 解析单日表格
+# 解析时段标题
+# 统一全角半角字符，避免冒号识别失败
 # ============================================================
 
 def normalize_slot(text):
-    return re.sub(
-        r"\s+",
-        "",
-        text or "",
-    ).replace("〜", "～")
+    text = unicodedata.normalize("NFKC", text or "")
+    text = re.sub(r"\s+", "", text)
 
+    return (
+        text
+        .replace("〜", "~")
+        .replace("～", "~")
+        .replace("－", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+    )
+
+
+# ============================================================
+# 解析单日表格
+# ============================================================
 
 def parse_day(page, date_text):
     table = page.locator("table.table_base")
@@ -711,7 +701,8 @@ def parse_day(page, date_text):
             f"{date_text}：时段数量或标题异常：{slots}"
         )
 
-    # 只保留当天规则要求的时段。
+    log(f"{date_text} 网页原始时段：{slots}")
+
     target_indexes = get_target_slot_indexes(
         date_text,
         slots,
@@ -769,7 +760,6 @@ def parse_day(page, date_text):
                 f"格数={len(expanded_cells)}，时段数={len(slots)}"
             )
 
-        # 只读取目标时段，其他时段完全不进入监控状态。
         for slot_index in target_indexes:
             slot = slots[slot_index]
             cell = expanded_cells[slot_index]
