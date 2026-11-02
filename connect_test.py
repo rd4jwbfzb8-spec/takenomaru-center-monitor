@@ -1,7 +1,8 @@
+
 import json
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -21,7 +22,8 @@ JST = ZoneInfo("Asia/Tokyo")
 
 def log(message):
     print(
-        f"[{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}] {message}",
+        f"[{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"{message}",
         flush=True
     )
 
@@ -91,26 +93,35 @@ def enter_reservation(browser):
     for attempt in range(1, 4):
         try:
             log(f"官网连接尝试：{attempt}/3")
+
             response = page.goto(
                 OFFICIAL_URL,
                 wait_until="commit",
                 timeout=45000
             )
+
             wait_page(page)
+
             log(f"官网页面：{page.url}")
             log(f"页面标题：{page.title()}")
             break
+
         except Exception as e:
             log(f"官网连接失败：{e}")
+
             if attempt == 3:
                 save_debug(page, "official_error")
-                raise RuntimeError("官网连续三次无法打开") from e
+                raise RuntimeError(
+                    "官网连续三次无法打开"
+                ) from e
+
             page.wait_for_timeout(3000)
 
     if response is not None:
         log(f"官网 HTTP 状态：{response.status}")
 
     log("2. 找到官网预约入口")
+
     forms = page.locator("form")
     entry_form = None
 
@@ -124,6 +135,7 @@ def enter_reservation(browser):
             item = inputs.nth(j)
             name = item.get_attribute("name")
             value = item.get_attribute("value")
+
             if name:
                 values[name] = value
 
@@ -138,23 +150,32 @@ def enter_reservation(browser):
 
     if entry_form is None:
         save_debug(page, "official_form_error")
-        raise RuntimeError("官网没有找到已确认的预约 POST 表单")
+        raise RuntimeError(
+            "官网没有找到已确认的预约 POST 表单"
+        )
 
     log("已确认官网预约表单及 POST 参数")
     log("3. 提交官网预约表单")
 
     try:
         with page.expect_popup(timeout=15000) as popup_info:
-            entry_form.locator('input[type="submit"]').first.click()
+            entry_form.locator(
+                'input[type="submit"]'
+            ).first.click()
+
         popup = popup_info.value
+
     except PlaywrightTimeoutError:
         if len(context.pages) > 1:
             popup = context.pages[-1]
         else:
             save_debug(page, "popup_error")
-            raise RuntimeError("提交官网表单后没有打开预约系统窗口")
+            raise RuntimeError(
+                "提交官网表单后没有打开预约系统窗口"
+            )
 
     wait_page(popup)
+
     log(f"预约系统 URL：{popup.url}")
     log(f"预约系统标题：{popup.title()}")
 
@@ -164,21 +185,26 @@ def enter_reservation(browser):
     )
 
     log("4. 点击空き状況からみる")
+
     authority = popup.locator(
         'input[name="authority"][value="空き状況からみる"]'
     )
 
     if authority.count() == 0:
         save_debug(popup, "authority_error")
-        raise RuntimeError("没有找到空き状況からみる按钮")
+        raise RuntimeError(
+            "没有找到空き状況からみる按钮"
+        )
 
     authority.click()
     wait_page(popup)
 
     log("5. 选择竹之丸地区中心体育室")
+
     grand = popup.locator('select[name="grand"]')
     grand.wait_for(state="visible")
     grand.select_option("4")
+
     grand.evaluate(
         """element => {
             if (!element.form) {
@@ -189,6 +215,7 @@ def enter_reservation(browser):
     )
 
     wait_page(popup)
+
     popup.wait_for_selector(
         'select[name="Ym_select"]',
         timeout=30000
@@ -210,7 +237,7 @@ def get_months(page):
     options = page.locator(
         'select[name="Ym_select"] option'
     ).evaluate_all(
-        """elements => elements.map(e => e.value)"""
+        "elements => elements.map(e => e.value)"
     )
 
     months = sorted({
@@ -221,9 +248,12 @@ def get_months(page):
 
     if not months:
         save_debug(page, "months_error")
-        raise RuntimeError("没有读取到可查询月份")
+        raise RuntimeError(
+            "没有读取到可查询月份"
+        )
 
     log(f"读取到月份：{months}")
+
     return months
 
 
@@ -235,9 +265,14 @@ def switch_month(page, month):
     )
 
     if has_function:
-        page.evaluate("(m) => SubmitFormM(m)", month)
+        page.evaluate(
+            "(m) => SubmitFormM(m)",
+            month
+        )
     else:
-        select = page.locator('select[name="Ym_select"]')
+        select = page.locator(
+            'select[name="Ym_select"]'
+        )
         select.select_option(month)
         select.evaluate(
             "element => element.form.requestSubmit()"
@@ -250,6 +285,11 @@ def switch_month(page, month):
     ).input_value()
 
     log(f"当前月份选择框值：{actual_month}")
+
+    if actual_month != month:
+        raise RuntimeError(
+            f"月份切换失败：期望 {month}，实际 {actual_month}"
+        )
 
 
 def get_dates(page):
@@ -277,86 +317,135 @@ def get_dates(page):
 
 
 # =========================
-# 日期诊断：只尝试一个日期
+# 日期诊断：点击真实日历按钮
 # =========================
 
 def diagnose_one_day(page, date_text, report):
     name = date_text.replace("-", "")
 
-    log(f"7. 开始诊断日期：{date_text}")
+    date_value = datetime.strptime(
+        date_text,
+        "%Y-%m-%d"
+    )
 
-    before_url = page.url
-    before_title = page.title()
+    expected_title = (
+        f"{date_value.year}年"
+        f"{date_value.month:02d}月"
+        f"{date_value.day:02d}日"
+    )
+
+    log(f"7. 开始诊断日期：{date_text}")
+    log(f"等待预约表标题：{expected_title}")
+
     before_html = page.content()
 
     report["test_date"] = date_text
+    report["expected_title"] = expected_title
+
     report["before"] = {
-        "url": before_url,
-        "title": before_title,
+        "url": page.url,
+        "title": page.title(),
         "html_length": len(before_html),
-        "table_count": page.locator("table.table_base").count()
+        "table_count": page.locator(
+            "table.table_base"
+        ).count()
     }
 
     save_debug(page, f"before_{name}")
 
-    # 记录页面跳转事件，避免再用未经确认的日期文本作为等待条件
-    navigation_result = "未检测到整页导航（可能是局部更新）"
+    # 使用日历上真实的日期按钮，不再直接调用 JS 函数
+    date_button = page.locator(
+        f'input[onclick*="{date_text}"]'
+    )
+
+    if date_button.count() == 0:
+        save_debug(page, f"date_button_error_{name}")
+        raise RuntimeError(
+            f"日历中没有找到日期按钮：{date_text}"
+        )
+
+    log("已找到日历日期按钮，准备点击")
+
+    navigation_result = "未检测到整页导航"
 
     try:
         with page.expect_navigation(
             wait_until="domcontentloaded",
             timeout=12000
         ):
-            page.evaluate(
-                "(d) => SubmitFormD(d)",
-                date_text
-            )
-        navigation_result = "检测到整页导航"
+            date_button.first.click()
+
+        navigation_result = "点击后检测到整页导航"
+
     except PlaywrightTimeoutError:
-        navigation_result = "12 秒内未检测到整页导航"
+        navigation_result = (
+            "点击后 12 秒内未检测到整页导航，继续检查预约表"
+        )
+
     except Exception as e:
         report["click_error"] = str(e)
-        navigation_result = f"执行日期查询时出现异常：{e}"
+        navigation_result = f"点击或导航异常：{e}"
 
-    # 不论整页跳转还是局部更新，都留出短暂时间并保存现场
+    log(f"页面跳转判断：{navigation_result}")
+
+    # 等待每日预约表出现目标日期
     try:
-        page.wait_for_timeout(3000)
-    except Exception as e:
-        report["settle_error"] = str(e)
+        page.wait_for_function(
+            """expected => {
+                const tables = document.querySelectorAll(
+                    "table.table_base"
+                );
+
+                return Array.from(tables).some(table =>
+                    (table.innerText || "").includes(expected)
+                );
+            }""",
+            arg=expected_title,
+            timeout=20000
+        )
+
+        report["date_switch_success"] = True
+        log(f"日期切换成功：预约表出现 {expected_title}")
+
+    except PlaywrightTimeoutError:
+        report["date_switch_success"] = False
+        report["date_switch_error"] = (
+            f"预约表在 20 秒内没有出现 {expected_title}"
+        )
+        log("日期切换尚未确认，保存当前页面供分析")
+
+    page.wait_for_timeout(1000)
+
+    after_html = page.content()
 
     try:
-        after_html = page.content()
+        page_text = page.locator(
+            "body"
+        ).inner_text(timeout=10000)
     except Exception as e:
-        after_html = ""
-        report["after_content_error"] = str(e)
-
-    try:
-        after_url = page.url
-        after_title = page.title()
-        table_count = page.locator("table.table_base").count()
-        page_text = page.locator("body").inner_text(timeout=10000)
-    except Exception as e:
-        after_url = page.url
-        after_title = ""
-        table_count = -1
         page_text = ""
         report["after_read_error"] = str(e)
 
     report["navigation_result"] = navigation_result
+
     report["after"] = {
-        "url": after_url,
-        "title": after_title,
+        "url": page.url,
+        "title": page.title(),
         "html_length": len(after_html),
         "html_changed": before_html != after_html,
-        "table_count": table_count,
+        "table_count": page.locator(
+            "table.table_base"
+        ).count(),
+        "target_title_found": expected_title in page_text,
         "body_text_preview": page_text[:5000]
     }
 
-    log(f"日期查询后的 URL：{after_url}")
-    log(f"日期查询后的标题：{after_title}")
-    log(f"页面跳转判断：{navigation_result}")
-    log(f"日期查询后 table.table_base 数量：{table_count}")
-    log(f"查询前后 HTML 是否变化：{before_html != after_html}")
+    log(f"日期查询后的 URL：{page.url}")
+    log(f"日期查询后的标题：{page.title()}")
+    log(
+        f"查询前后 HTML 是否变化："
+        f"{before_html != after_html}"
+    )
 
     save_debug(page, f"after_{name}")
     save_report(report)
@@ -406,9 +495,12 @@ def main():
                     continue
 
                 switch_month(page, month)
+
                 month_dates = get_dates(page)
 
-                log(f"{month} 找到 {len(month_dates)} 个日期")
+                log(
+                    f"{month} 找到 {len(month_dates)} 个日期"
+                )
 
                 for date_text in month_dates:
                     try:
@@ -417,22 +509,35 @@ def main():
                             "%Y-%m-%d"
                         ).date()
 
-                        if date_value >= today:
+                        if date_value > today:
                             dates.add(date_text)
+
                     except ValueError:
                         pass
 
             dates = sorted(dates)
             report["date_count"] = len(dates)
 
-            log(f"待查询日期总数：{len(dates)}")
+            log(f"待查询未来日期总数：{len(dates)}")
 
             if not dates:
-                raise RuntimeError("没有找到今天及以后的日期")
+                raise RuntimeError(
+                    "没有找到今天以后的日期"
+                )
 
-            # 只诊断第一个日期，绝不循环查询全部日期
-            test_date = dates[0]
-            test_month = test_date[:4] + test_date[5:7]
+            # 只测试下一个未来日期，不再选择已经显示的当天
+            tomorrow = (today + timedelta(days=1)).isoformat()
+
+            if tomorrow in dates:
+                test_date = tomorrow
+            else:
+                test_date = dates[0]
+
+            log(f"本次唯一测试日期：{test_date}")
+
+            test_month = (
+                test_date[:4] + test_date[5:7]
+            )
 
             current_month = page.locator(
                 'select[name="Ym_select"]'
@@ -441,7 +546,11 @@ def main():
             if current_month != test_month:
                 switch_month(page, test_month)
 
-            diagnose_one_day(page, test_date, report)
+            diagnose_one_day(
+                page,
+                test_date,
+                report
+            )
 
         except Exception as e:
             report["fatal_error"] = str(e)
@@ -451,6 +560,7 @@ def main():
                 save_debug(page, "fatal_error")
 
             save_report(report)
+
             log(f"运行失败：{e}")
             raise
 
