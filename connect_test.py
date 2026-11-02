@@ -70,7 +70,6 @@ def wait_page(page):
     except PlaywrightTimeoutError:
         pass
 
-    # 恢复之前成功版本的等待时间
     page.wait_for_timeout(2000)
 
 
@@ -441,6 +440,18 @@ def diagnose_one_day(page, date_text, report):
         "body_text_preview": page_text[:5000]
     }
 
+    # 新增：保存预约表完整 HTML，检查每个时间格的 checkbox
+    try:
+        report["table_html"] = page.locator(
+            "table.table_base"
+        ).first.evaluate(
+            "element => element.outerHTML"
+        )
+        log("预约表完整 HTML 已写入诊断报告")
+    except Exception as e:
+        report["table_html_error"] = str(e)
+        log(f"预约表 HTML 读取失败：{e}")
+
     log(f"日期查询后的 URL：{page.url}")
     log(f"日期查询后的标题：{page.title()}")
     log(
@@ -467,7 +478,7 @@ def main():
     report = {
         "run_time": datetime.now(JST).isoformat(),
         "today": today.isoformat(),
-        "purpose": "单日日期查询诊断，不发送通知，不更新状态",
+        "purpose": "单日日期查询诊断，附带预约表完整HTML，不发送通知，不更新状态",
         "months": [],
         "date_count": 0,
         "test_date": None,
