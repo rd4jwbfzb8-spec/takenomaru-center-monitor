@@ -323,7 +323,7 @@ def open_day(page, date_text):
     )
 
     page.wait_for_function(
-        """date => {
+        """({date}) => {
             const tables = document.querySelectorAll("table.table_base");
 
             return Array.from(tables).some(table => {
@@ -331,12 +331,11 @@ def open_day(page, date_text):
                 return text.includes(date);
             });
         }""",
-        date_text,
+        arg={"date": date_text},
         timeout=20000
     )
 
     page.wait_for_timeout(500)
-
 
 # =========================
 # 空位判断
