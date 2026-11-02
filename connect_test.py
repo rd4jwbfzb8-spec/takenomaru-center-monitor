@@ -13,7 +13,7 @@ from playwright.sync_api import (
 
 # ============================================================
 # 竹之丸地区中心：普通工作日预约表诊断
-# 固定测试日期：2026-11-04
+# 测试日期：2026-11-04
 # 只读取网页，不发送 ntfy，不读取或更新 state.json
 # ============================================================
 
@@ -44,10 +44,43 @@ def wait_page(page):
     page.wait_for_timeout(1500)
 
 
+def save_failure_page(page, prefix):
+    """出错时保存当前页面，便于定位问题。"""
+
+    try:
+        REPORT_DIR.mkdir(exist_ok=True)
+
+        html_path = REPORT_DIR / f"{prefix}_failure.html"
+        html_path.write_text(
+            page.content(),
+            encoding="utf-8"
+        )
+
+        screenshot_path = REPORT_DIR / f"{prefix}_failure.png"
+        page.screenshot(
+            path=str(screenshot_path),
+            full_page=True
+        )
+
+        log(f"失败页面 HTML：{html_path}")
+        log(f"失败页面截图：{screenshot_path}")
+
+        return {
+            "url": page.url,
+            "title": page.title(),
+            "body_text": page.locator("body").inner_text()[:8000],
+            "html_file": str(html_path),
+            "screenshot_file": str(screenshot_path)
+        }
+
+    except Exception as e:
+        return {"save_error": str(e)}
+
+
 def enter_reservation(browser):
     """
-    从竹之丸中心官网进入预约系统。
-    必须通过官网表单打开预约系统，不直接访问登录入口。
+    从中心官网进入预约系统。
+    保留官网表单、弹窗和设施选择流程。
     """
 
     context = browser.new_context(
@@ -119,7 +152,6 @@ def enter_reservation(browser):
 
     log("找到官网预约入口表单")
 
-    # 检查隐藏参数，避免打开错误入口
     form_locator = page.locator(
         "form[action*='VisitorLogin.php']"
     ).first
@@ -172,25 +204,133 @@ def enter_reservation(browser):
 
     log("5. 选择竹之丸地区中心体育室")
 
-    reservation_page.locator(
+    facility_select = reservation_page.locator(
         'select[name="grand"]'
-    ).select_option("4")
+    )
 
-    reservation_page.evaluate("""
-        () => {
-            const form = document.querySelector("form");
-            if (form) {
-                form.requestSubmit();
+    facility_select.wait_for(
+        state="visible",
+        timeout=20000
+    )
+
+    facility_select.select_option("4")
+
+    # 关键修正：
+    # 不再使用 document.querySelector("form") 获取第一个表单。
+    # 而是从 grand 设施选择框取得它真正所属的表单。
+    form_info = facility_select.evaluate("""
+        select => {
+            const form = select.form;
+
+            if (!form) {
+                return {
+                    found: false,
+                    error: "设施选择框没有所属表单"
+                };
             }
+
+            const submitters = Array.from(
+                form.querySelectorAll(
+                    'input[type="submit"], input[type="image"], button[type="submit"], button:not([type])'
+                )
+            );
+
+            return {
+                found: true,
+                action: form.getAttribute("action"),
+                method: form.getAttribute("method"),
+                selectedValue: select.value,
+                selectedText:
+                    select.options[select.selectedIndex]?.text || "",
+                submitters: submitters.map(button => ({
+                    tag: button.tagName,
+                    type: button.type,
+                    name: button.name,
+                    value: button.value,
+                    text: button.innerText || "",
+                    html: button.outerHTML
+                })),
+                formHtml: form.outerHTML.slice(0, 6000)
+            };
         }
     """)
 
-    reservation_page.locator(
-        'select[name="Ym_select"]'
-    ).wait_for(
-        state="visible",
-        timeout=30000
+    log(f"设施表单信息：{form_info}")
+
+    if not form_info.get("found"):
+        raise RuntimeError(
+            "找不到 grand 设施选择框所属表单"
+        )
+
+    if form_info.get("selectedValue") != "4":
+        raise RuntimeError(
+            "体育室设施选择失败，当前值不是4"
+        )
+
+    log("确认已选择竹之丸地区中心体育室，准备提交")
+
+    # 优先点击设施表单自己的提交按钮。
+    # 如果没有提交按钮，再对这个表单调用 requestSubmit。
+    submitter_locator = facility_select.locator(
+        "xpath=.."
     )
+
+    # 直接在设施选择框所属表单内执行提交，
+    # 避免误提交页面上的其他 form。
+    try:
+        with reservation_page.expect_navigation(
+            wait_until="domcontentloaded",
+            timeout=20000
+        ):
+            facility_select.evaluate("""
+                select => {
+                    const form = select.form;
+
+                    if (!form) {
+                        throw new Error(
+                            "设施选择框没有所属表单"
+                        );
+                    }
+
+                    const submitter = form.querySelector(
+                        'input[type="submit"], input[type="image"], button[type="submit"], button:not([type])'
+                    );
+
+                    if (submitter) {
+                        submitter.click();
+                    } else {
+                        form.requestSubmit();
+                    }
+                }
+            """)
+
+        log("设施表单提交后检测到页面导航")
+
+    except PlaywrightTimeoutError:
+        log("设施提交后未检测到标准导航，继续检查页面")
+
+    # 等待预约状况页面的月份选择框出现。
+    try:
+        reservation_page.locator(
+            'select[name="Ym_select"]'
+        ).wait_for(
+            state="visible",
+            timeout=30000
+        )
+
+    except PlaywrightTimeoutError:
+        failure_info = save_failure_page(
+            reservation_page,
+            "facility_submit"
+        )
+
+        log(f"提交后的页面诊断：{failure_info}")
+
+        raise RuntimeError(
+            "设施表单提交后没有出现月份选择框。"
+            f"当前 URL：{reservation_page.url}；"
+            f"页面标题：{reservation_page.title()}"
+        )
 
     wait_page(reservation_page)
 
@@ -214,7 +354,6 @@ def get_months(page):
 def switch_month(page, month):
     log(f"切换查询月份：{month}")
 
-    # 优先使用已经验证过的月份切换函数
     page.evaluate("""
         month => {
             if (typeof SubmitFormM === "function") {
@@ -231,7 +370,7 @@ def switch_month(page, month):
 
                 select.value = month;
 
-                const form = select.closest("form");
+                const form = select.form;
 
                 if (form) {
                     form.requestSubmit();
@@ -297,7 +436,6 @@ def switch_date(page, date_text):
     except PlaywrightTimeoutError:
         log("点击后没有检测到标准导航，继续检查页面")
 
-    # 等待预约表真正切换到目标日期
     page.wait_for_function(
         """dateText => {
             const caption =
@@ -324,11 +462,6 @@ def switch_date(page, date_text):
 
 
 def collect_page_images(page):
-    """
-    收集页面所有图片及其附近 HTML。
-    用于确认 msg_icon01、msg_icon02 等图标的含义。
-    """
-
     return page.locator("body").evaluate("""
         body => {
             return Array.from(body.querySelectorAll("img"))
@@ -356,11 +489,6 @@ def collect_page_images(page):
 
 
 def collect_legend_candidates(page):
-    """
-    收集状态图例附近的 HTML。
-    不根据图标文件名猜测状态。
-    """
-
     return page.locator("body").evaluate("""
         body => {
             const terms = [
@@ -471,7 +599,6 @@ def diagnose(page):
 
     switch_date(page, TEST_DATE)
 
-    # 保存完整页面 HTML
     full_html = page.content()
 
     html_file = REPORT_DIR / "weekday_20261104.html"
@@ -482,7 +609,6 @@ def diagnose(page):
 
     log(f"完整网页 HTML 已保存：{html_file}")
 
-    # 保存预约表 HTML
     table_html = page.locator(
         "table.table_base"
     ).first.evaluate(
@@ -499,7 +625,6 @@ def diagnose(page):
 
     log(f"预约表 HTML 已保存：{table_file}")
 
-    # 收集所有图片及附近结构
     report["page_images"] = collect_page_images(page)
 
     log(
@@ -507,7 +632,6 @@ def diagnose(page):
         f"{len(report['page_images'])}"
     )
 
-    # 收集状态图例候选区域
     report["legend_candidates"] = (
         collect_legend_candidates(page)
     )
@@ -517,7 +641,6 @@ def diagnose(page):
         f"{len(report['legend_candidates'])}"
     )
 
-    # 保存截图
     screenshot_file = (
         REPORT_DIR / "weekday_20261104.png"
     )
@@ -529,7 +652,6 @@ def diagnose(page):
 
     log(f"页面截图已保存：{screenshot_file}")
 
-    # 基础信息
     report["page_url"] = page.url
     report["page_title"] = page.title()
     report["table_count"] = page.locator(
