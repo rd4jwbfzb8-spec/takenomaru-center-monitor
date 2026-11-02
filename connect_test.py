@@ -15,27 +15,31 @@ async def page_info(page):
         "title": await page.title(),
         "body_excerpt": (
             await page.locator("body").inner_text()
-        )[:12000],
-        "links": await page.locator("a").evaluate_all(
-            """els => els.map(a => ({
-                text: (a.innerText || '').trim(),
-                href: a.href
-            })).slice(0, 150)"""
-        ),
+        )[:15000],
         "interactive_elements": await page.locator(
-            "button, input, select, [role=button], "
-            "a, img, area"
+            "button, input, select, [role=button], a"
         ).evaluate_all(
             """els => els.map(e => ({
                 tag: e.tagName,
                 text: (e.innerText || e.value || '').trim(),
                 type: e.type || '',
                 name: e.name || '',
+                value: e.value || '',
                 id: e.id || '',
-                role: e.getAttribute('role') || '',
                 onclick: e.getAttribute('onclick') || '',
                 href: e.href || ''
             })).slice(0, 200)"""
+        ),
+        "forms": await page.locator("form").evaluate_all(
+            """els => els.map(f => ({
+                action: f.action,
+                method: f.method,
+                inputs: Array.from(f.elements).map(e => ({
+                    name: e.name,
+                    type: e.type,
+                    value: e.value
+                }))
+            }))"""
         )
     }
 
@@ -75,13 +79,7 @@ async def main():
                 exact=False,
             )
 
-            count = await target.count()
-            report["steps"].append({
-                "step": "find_reservation_button",
-                "matches": count,
-            })
-
-            if count == 0:
+            if await target.count() == 0:
                 raise RuntimeError("Reservation button not found")
 
             try:
@@ -95,64 +93,57 @@ async def main():
                 "domcontentloaded",
                 timeout=60000,
             )
-            await reserve.wait_for_timeout(2000)
+            await reserve.wait_for_timeout(1500)
 
             report["steps"].append({
-                "step": "after_official_button_click",
+                "step": "open_reservation_system",
                 "url": reserve.url,
                 "title": await reserve.title(),
             })
 
-            report["reservation_page_before"] = await page_info(reserve)
+            report["page_before"] = await page_info(reserve)
 
             await reserve.screenshot(
-                path=str(OUT / "01_reservation_menu.png"),
+                path=str(OUT / "01_reservation.png"),
                 full_page=True,
             )
 
-            # Next step: click "空き照会・予約"
-            menu = reserve.get_by_text(
-                "空き照会・予約",
-                exact=True,
+            # Locate the actual HTML input button.
+            availability_button = reserve.locator(
+                'input[type="button"][name="authority"]'
+                '[value="空き状況からみる"]'
             )
 
-            menu_count = await menu.count()
+            count = await availability_button.count()
 
             report["steps"].append({
-                "step": "find_availability_menu",
-                "matches": menu_count,
+                "step": "find_availability_button",
+                "matches": count,
             })
 
-            if menu_count > 0:
-                try:
-                    await menu.first.click(timeout=15000)
-                    await reserve.wait_for_timeout(2500)
-
-                    report["steps"].append({
-                        "step": "click_availability_menu",
-                        "status": "clicked",
-                        "url": reserve.url,
-                        "title": await reserve.title(),
-                    })
-
-                    report["availability_page"] = await page_info(
-                        reserve
-                    )
-
-                    await reserve.screenshot(
-                        path=str(OUT / "02_availability_menu.png"),
-                        full_page=True,
-                    )
-
-                except Exception as e:
-                    report["errors"].append(
-                        "Availability menu click: "
-                        + type(e).__name__ + ": " + str(e)
-                    )
-            else:
-                report["availability_page"] = (
-                    "空き照会・予約 menu not found"
+            if count == 0:
+                raise RuntimeError(
+                    "空き状況からみる button not found"
                 )
+
+            await availability_button.first.click(timeout=15000)
+            await reserve.wait_for_timeout(3000)
+
+            report["steps"].append({
+                "step": "click_availability_button",
+                "status": "clicked",
+                "url": reserve.url,
+                "title": await reserve.title(),
+            })
+
+            report["availability_page"] = await page_info(
+                reserve
+            )
+
+            await reserve.screenshot(
+                path=str(OUT / "02_facility_selection.png"),
+                full_page=True,
+            )
 
         except Exception as e:
             report["errors"].append(
