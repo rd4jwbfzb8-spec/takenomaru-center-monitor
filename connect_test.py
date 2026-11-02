@@ -70,7 +70,8 @@ def wait_page(page):
     except PlaywrightTimeoutError:
         pass
 
-    page.wait_for_timeout(1500)
+    # 恢复之前成功版本的等待时间
+    page.wait_for_timeout(2000)
 
 
 # =========================
@@ -353,7 +354,7 @@ def diagnose_one_day(page, date_text, report):
 
     save_debug(page, f"before_{name}")
 
-    # 使用日历上真实的日期按钮，不再直接调用 JS 函数
+    # 使用日历上真实的日期按钮
     date_button = page.locator(
         f'input[onclick*="{date_text}"]'
     )
@@ -525,7 +526,7 @@ def main():
                     "没有找到今天以后的日期"
                 )
 
-            # 只测试下一个未来日期，不再选择已经显示的当天
+            # 优先测试明天，避免重复查询页面当前显示的日期
             tomorrow = (today + timedelta(days=1)).isoformat()
 
             if tomorrow in dates:
