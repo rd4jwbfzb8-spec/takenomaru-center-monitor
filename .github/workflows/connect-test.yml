@@ -32,6 +32,17 @@ jobs:
       - name: Test official reservation flow
         run: python connect_test.py
 
+      - name: Print test report
+        if: always()
+        run: |
+          echo "========== TAKENOMARU TEST REPORT =========="
+          if [ -f artifacts/report.json ]; then
+            cat artifacts/report.json
+          else
+            echo "report.json was not created."
+            echo "========== END REPORT =========="
+          fi
+
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
