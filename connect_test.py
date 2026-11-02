@@ -1,7 +1,6 @@
 
 import json
 import re
-import time
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -97,7 +96,6 @@ def enter_reservation(browser):
 
     log("1. 打开竹之丸地区中心官网")
 
-    # 不等待所有资源加载完成，避免官网图片等资源拖慢加载
     response = None
 
     for attempt in range(1, 4):
@@ -133,9 +131,7 @@ def enter_reservation(browser):
 
     log("2. 找到官网预约入口")
 
-    # 使用官网真实表单，保留原来的 POST 参数
     forms = page.locator("form")
-
     entry_form = None
 
     for i in range(forms.count()):
@@ -173,9 +169,6 @@ def enter_reservation(browser):
 
     log("3. 提交官网预约表单")
 
-    # 官网表单原本 target=_blank，保留新窗口行为
-    popup = None
-
     try:
         with page.expect_popup(timeout=15000) as popup_info:
             entry_form.locator(
@@ -198,7 +191,6 @@ def enter_reservation(browser):
     log(f"预约系统 URL：{popup.url}")
     log(f"预约系统标题：{popup.title()}")
 
-    # 等待预约系统真正出现
     popup.wait_for_selector(
         'input[name="authority"]',
         timeout=30000
@@ -221,10 +213,8 @@ def enter_reservation(browser):
 
     grand = popup.locator('select[name="grand"]')
     grand.wait_for(state="visible")
-
     grand.select_option("4")
 
-    # 使用预约页面原有表单提交
     grand.evaluate(
         """element => {
             if (!element.form) {
@@ -266,7 +256,7 @@ def get_months(page):
     months = sorted({
         str(item["value"])
         for item in options
-        if re.fullmatch(r"\\d{6}", str(item["value"]))
+        if re.fullmatch(r"\d{6}", str(item["value"]))
     })
 
     if not months:
@@ -312,7 +302,7 @@ def get_dates(page):
             continue
 
         match = re.search(
-            r"SubmitFormD\\(['\"](\\d{4}-\\d{2}-\\d{2})['\"]\\)",
+            r"""SubmitFormD\(['"](\d{4}-\d{2}-\d{2})['"]\)""",
             onclick
         )
 
@@ -380,7 +370,7 @@ def read_daily(page, date_text):
             continue
 
         room_name = re.sub(
-            r"\\s+",
+            r"\s+",
             "",
             cells.nth(0).inner_text()
         )
@@ -453,7 +443,7 @@ def send_ntfy(items):
 
     request = Request(
         NTFY_URL,
-        data="\\n".join(lines).encode("utf-8"),
+        data="\n".join(lines).encode("utf-8"),
         headers={
             "Title": "竹之丸地区中心空位通知",
             "Priority": "high"
@@ -484,7 +474,6 @@ def main():
 
     with sync_playwright() as p:
         browser = None
-        context = None
 
         try:
             browser = p.chromium.launch(
@@ -597,7 +586,6 @@ def main():
             raise
 
         finally:
-            # 必须在 Playwright 上下文退出前关闭浏览器
             if browser is not None:
                 try:
                     browser.close()
