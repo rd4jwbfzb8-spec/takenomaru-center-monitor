@@ -4,17 +4,12 @@ import os
 from datetime import datetime, timezone
 from playwright.sync_api import sync_playwright
 
-OFFICIAL_URL = (
-    "https://www.nakakumin.com/"
-    "takenomaruchikusen/"
-)
+OFFICIAL_URL = "https://www.nakakumin.com/takenomaruchikusen/"
 
-REPORT_DIR = "artifacts"
-os.makedirs(REPORT_DIR, exist_ok=True)
+os.makedirs("artifacts", exist_ok=True)
 
 report = {
     "test_time": datetime.now(timezone.utc).isoformat(),
-    "official_url": OFFICIAL_URL,
     "reservation_url": "",
     "page_title": "",
     "grand_options": [],
@@ -25,13 +20,46 @@ report = {
 }
 
 
-def save_report():
-    with open(
-        os.path.join(REPORT_DIR, "report.json"),
-        "w",
-        encoding="utf-8"
-    ) as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+def read_page(page):
+    report["reservation_url"] = page.url
+    report["page_title"] = page.title()
+
+    report["grand_options"] = page.locator(
+        'select[name="grand"] option'
+    ).evaluate_all("""
+        options => options.map(option => ({
+            value: option.value,
+            text: option.textContent.trim(),
+            selected: option.selected
+        }))
+    """)
+
+    report["selects"] = page.locator("select").evaluate_all("""
+        selects => selects.map(select => ({
+            name: select.name,
+            value: select.value,
+            options: Array.from(select.options).map(option => ({
+                value: option.value,
+                text: option.textContent.trim()
+            }))
+        }))
+    """)
+
+    report["forms"] = page.locator("form").evaluate_all("""
+        forms => forms.map(form => ({
+            action: form.action,
+            method: form.method,
+            inputs: Array.from(
+                form.querySelectorAll("input, select")
+            ).map(input => ({
+                name: input.name,
+                type: input.type,
+                value: input.value
+            }))
+        }))
+    """)
+
+    report["page_text"] = page.locator("body").inner_text()[:12000]
 
 
 with sync_playwright() as p:
@@ -49,79 +77,56 @@ with sync_playwright() as p:
         )
         page.wait_for_timeout(2000)
 
-        print("官网：", page.url)
-        print("标题：", page.title())
-
         print("2. 找到官网预约表单")
 
-        reservation_form = page.locator(
+        form = page.locator(
             'form[action*="VisitorLogin.php"]'
         ).first
 
-        if reservation_form.count() == 0:
+        if form.count() == 0:
             raise Exception("没有找到官网预约表单")
 
-        form_data = reservation_form.evaluate("""
-            form => ({
-                action: form.action,
-                method: form.method,
-                target: form.target,
-                inputs: Array.from(form.querySelectorAll("input")).map(
-                    input => ({
-                        name: input.name,
-                        value: input.value,
-                        type: input.type
-                    })
-                )
-            })
-        """)
+        print("3. 提交官网预约表单")
 
-        print("预约表单：")
-        print(json.dumps(form_data, ensure_ascii=False, indent=2))
-
-        print("3. 通过官网表单提交预约请求")
-
-        submit_button = reservation_form.locator(
+        submit = form.locator(
             'input[type="submit"]'
-        )
+        ).first
 
         with page.expect_popup(timeout=30000) as popup_info:
-            submit_button.click()
+            submit.click()
 
         reservation_page = popup_info.value
-
         reservation_page.wait_for_load_state(
             "domcontentloaded",
             timeout=60000
         )
-        reservation_page.wait_for_timeout(3000)
-
-        report["reservation_url"] = reservation_page.url
-        report["page_title"] = reservation_page.title()
+        reservation_page.wait_for_timeout(2000)
 
         print("预约页面：", reservation_page.url)
         print("页面标题：", reservation_page.title())
+        print("4. 点击空き状況からみる")
 
-        print("4. 读取 grand 全部选项")
-
-        grand = reservation_page.locator(
-            'select[name="grand"]'
+        availability_button = reservation_page.locator(
+            'input[name="authority"][value="空き状況からみる"]'
         )
 
-        if grand.count() > 0:
-            report["grand_options"] = grand.locator(
-                "option"
-            ).evaluate_all("""
-                options => options.map(option => ({
-                    value: option.value,
-                    text: option.textContent.trim(),
-                    selected: option.selected
-                }))
-            """)
-        else:
-            report["errors"].append(
-                "预约页面没有找到 select[name='grand']"
-            )
+        if availability_button.count() == 0:
+            raise Exception("没有找到「空き状況からみる」按钮")
+
+        with reservation_page.expect_navigation(
+            wait_until="domcontentloaded",
+            timeout=30000
+        ):
+            availability_button.click()
+
+        reservation_page.wait_for_timeout(2000)
+
+        print("点击后页面：", reservation_page.url)
+        print("点击后标题：", reservation_page.title())
+
+        print("5. 读取场地选择器")
+
+        read_page(reservation_page)
 
         print("GRAND_OPTIONS:")
         print(json.dumps(
@@ -130,47 +135,15 @@ with sync_playwright() as p:
             indent=2
         ))
 
-        print("5. 读取页面其他下拉选项")
-
-        report["selects"] = reservation_page.locator(
-            "select"
-        ).evaluate_all("""
-            selects => selects.map(select => ({
-                name: select.name,
-                value: select.value,
-                options: Array.from(select.options).map(option => ({
-                    value: option.value,
-                    text: option.textContent.trim()
-                }))
-            }))
-        """)
-
-        print("6. 读取页面表单")
-
-        report["forms"] = reservation_page.locator(
-            "form"
-        ).evaluate_all("""
-            forms => forms.map(form => ({
-                action: form.action,
-                method: form.method,
-                inputs: Array.from(
-                    form.querySelectorAll("input, select")
-                ).map(input => ({
-                    name: input.name,
-                    type: input.type,
-                    value: input.value
-                }))
-            }))
-        """)
-
-        print("7. 读取页面文字")
-
-        report["page_text"] = reservation_page.locator(
-            "body"
-        ).inner_text()[:12000]
-
-        print("页面内容：")
+        print("6. 页面文字")
         print(report["page_text"][:5000])
+
+        print("7. 表单信息")
+        print(json.dumps(
+            report["forms"],
+            ensure_ascii=False,
+            indent=2
+        ))
 
         print("诊断完成")
 
@@ -179,6 +152,18 @@ with sync_playwright() as p:
         print("发生错误：", repr(e))
 
     finally:
-        save_report()
+        with open(
+            "artifacts/report.json",
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                report,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
         print("报告已保存：artifacts/report.json")
+        print("ERRORS:", report["errors"])
         browser.close()
