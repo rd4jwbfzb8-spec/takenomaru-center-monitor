@@ -11,7 +11,10 @@ from zoneinfo import ZoneInfo
 
 import jpholiday
 import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    sync_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 
 # ============================================================
@@ -21,9 +24,11 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 OFFICIAL_URL = "https://www.nakakumin.com/takenomaruchikusen/"
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "minami-rsv-k8p4x7q2m9")
 NTFY_URL = "https://ntfy.sh"
+
 STATE_FILE = Path("state.json")
 REPORT_DIR = Path("artifacts")
 REPORT_FILE = REPORT_DIR / "monitor_report.json"
+
 JST = ZoneInfo("Asia/Tokyo")
 
 ROOMS = {
@@ -38,7 +43,8 @@ MAX_DATES_PER_RUN = 120
 
 def log(message):
     print(
-        f"[{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}] {message}",
+        f"[{datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"{message}",
         flush=True,
     )
 
@@ -52,7 +58,6 @@ def save_report(report):
 
 
 def save_debug(page, name):
-    """必须在 Playwright 仍运行时调用。"""
     if page is None:
         return
 
@@ -67,7 +72,8 @@ def save_debug(page, name):
 
     try:
         (REPORT_DIR / f"{name}.html").write_text(
-            page.content(), encoding="utf-8"
+            page.content(),
+            encoding="utf-8",
         )
         log(f"已保存错误现场 HTML：artifacts/{name}.html")
     except Exception as exc:
@@ -86,9 +92,13 @@ def save_debug(page, name):
 
 def wait_page(page, milliseconds=1200):
     try:
-        page.wait_for_load_state("domcontentloaded", timeout=12000)
+        page.wait_for_load_state(
+            "domcontentloaded",
+            timeout=12000,
+        )
     except PlaywrightTimeoutError:
         pass
+
     page.wait_for_timeout(milliseconds)
 
 
@@ -101,6 +111,7 @@ def enter_reservation(browser):
         locale="ja-JP",
         viewport={"width": 1440, "height": 1000},
     )
+
     page = context.new_page()
     page.set_default_timeout(20000)
     page.set_default_navigation_timeout(90000)
@@ -110,17 +121,21 @@ def enter_reservation(browser):
     for attempt in range(1, 4):
         try:
             log(f"官网连接尝试：{attempt}/3")
+
             response = page.goto(
                 OFFICIAL_URL,
                 wait_until="commit",
                 timeout=45000,
             )
+
             wait_page(page)
+
             log(f"官网页面：{page.url}")
             log(f"官网标题：{page.title()}")
 
             if response is not None:
                 log(f"官网 HTTP 状态：{response.status}")
+
             break
 
         except Exception as exc:
@@ -128,7 +143,9 @@ def enter_reservation(browser):
 
             if attempt == 3:
                 save_debug(page, "official_error")
-                raise RuntimeError("官网连续三次无法打开") from exc
+                raise RuntimeError(
+                    "官网连续三次无法打开"
+                ) from exc
 
             page.wait_for_timeout(3000)
 
@@ -162,13 +179,17 @@ def enter_reservation(browser):
 
     if entry_form is None:
         save_debug(page, "official_form_error")
-        raise RuntimeError("官网没有找到已确认的预约 POST 表单")
+        raise RuntimeError(
+            "官网没有找到已确认的预约 POST 表单"
+        )
 
     log("3. 提交官网预约表单并打开预约系统窗口")
 
     try:
         with page.expect_popup(timeout=15000) as popup_info:
-            entry_form.locator('input[type="submit"]').first.click()
+            entry_form.locator(
+                'input[type="submit"]'
+            ).first.click()
 
         popup = popup_info.value
 
@@ -177,7 +198,9 @@ def enter_reservation(browser):
             popup = context.pages[-1]
         else:
             save_debug(page, "popup_error")
-            raise RuntimeError("提交官网表单后没有打开预约系统窗口")
+            raise RuntimeError(
+                "提交官网表单后没有打开预约系统窗口"
+            )
 
     wait_page(popup)
 
@@ -197,7 +220,9 @@ def enter_reservation(browser):
 
     if authority.count() == 0:
         save_debug(popup, "authority_error")
-        raise RuntimeError("没有找到「空き状況からみる」按钮")
+        raise RuntimeError(
+            "没有找到「空き状況からみる」按钮"
+        )
 
     authority.click()
     wait_page(popup)
@@ -261,6 +286,16 @@ def current_month(page):
     ).input_value()
 
 
+# ============================================================
+# 月份切换：修改版
+#
+# 1. 保留原来的 SubmitFormM 提交方式
+# 2. 等待月份值更新
+# 3. 预约表只要求 attached，不要求 visible
+# 4. 检查页面结构
+# 5. 失败时打印详细诊断
+# ============================================================
+
 def switch_month(page, month):
     if current_month(page) == month:
         return
@@ -272,38 +307,96 @@ def switch_month(page, month):
     )
 
     if has_function:
-        page.evaluate("month => SubmitFormM(month)", month)
+        page.evaluate(
+            "month => SubmitFormM(month)",
+            month,
+        )
     else:
-        selector = page.locator('select[name="Ym_select"]')
+        selector = page.locator(
+            'select[name="Ym_select"]'
+        )
+
         selector.select_option(month)
+
         selector.evaluate(
             "element => element.form.requestSubmit()"
         )
 
-    page.wait_for_function(
-        """month => {
-            const el = document.querySelector(
-                'select[name="Ym_select"]'
-            );
-            return !!el && el.value === month;
-        }""",
-        arg=month,
-        timeout=45000,
-    )
+    try:
+        page.wait_for_function(
+            """month => {
+                const el = document.querySelector(
+                    'select[name="Ym_select"]'
+                );
+                return !!el && el.value === month;
+            }""",
+            arg=month,
+            timeout=45000,
+        )
 
-    page.wait_for_selector(
-        "table.table_base",
-        timeout=30000,
-    )
+        # 修改：只等待表格进入 DOM
+        # 不再强制要求表格可见。
+        page.wait_for_selector(
+            "table.table_base",
+            state="attached",
+            timeout=15000,
+        )
 
-    log(f"月份切换完成：{current_month(page)}")
+        calendar_count = page.locator(
+            '[onclick*="SubmitFormD("]'
+        ).count()
 
+        caption_count = page.locator(
+            "table.table_base caption"
+        ).count()
+
+        if calendar_count == 0 and caption_count == 0:
+            raise RuntimeError(
+                f"{month}：页面没有有效日历或预约表"
+            )
+
+        actual_month = current_month(page)
+
+        if actual_month != month:
+            raise RuntimeError(
+                f"月份不匹配："
+                f"目标={month}，实际={actual_month}"
+            )
+
+        log(f"月份切换完成：{actual_month}")
+
+    except Exception as exc:
+        log(f"月份切换失败：{month}")
+        log(f"当前页面 URL：{page.url}")
+
+        try:
+            log(f"当前页面标题：{page.title()}")
+
+            body_text = page.locator(
+                "body"
+            ).inner_text(timeout=3000)
+
+            log(
+                "当前页面文字（前1000字）："
+                + body_text[:1000]
+            )
+
+        except Exception as diagnostic_error:
+            log(
+                f"读取诊断信息失败："
+                f"{diagnostic_error}"
+            )
+
+        raise RuntimeError(
+            f"切换到 {month} 失败：{exc}"
+        ) from exc
+
+
+# ============================================================
+# 判断红色文字
+# ============================================================
 
 def is_red_color(color):
-    """
-    判断明显的红色文字。
-    兼容 rgb() 和 rgba()。
-    """
     match = re.search(
         r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)",
         color or "",
@@ -332,7 +425,8 @@ def get_dates(page):
         '[onclick*="SubmitFormD("]'
     ).evaluate_all(
         """elements => elements.map(element => {
-            const onclick = element.getAttribute('onclick') || '';
+            const onclick =
+                element.getAttribute('onclick') || '';
 
             const match = onclick.match(
                 /SubmitFormD\\(['"]([0-9]{4}-[0-9]{2}-[0-9]{2})['"]\\)/
@@ -391,7 +485,8 @@ def get_dates(page):
         is_closed = bool(red_colors)
 
         result[date_text] = (
-            result.get(date_text, False) or is_closed
+            result.get(date_text, False)
+            or is_closed
         )
 
         if is_closed:
@@ -449,7 +544,10 @@ def switch_date(page, date_text):
         caption.count()
         and expected in caption.first.inner_text()
     ):
-        log(f"{date_text} 页面已经是目标日期，无需重复切换")
+        log(
+            f"{date_text} 页面已经是目标日期，"
+            "无需重复切换"
+        )
         return True
 
     log(f"查询日期：{date_text}")
@@ -498,7 +596,11 @@ def switch_date(page, date_text):
             return False
 
         try:
-            log(f"日期切换等待超时，当前 URL：{page.url}")
+            log(
+                f"日期切换等待超时，"
+                f"当前 URL：{page.url}"
+            )
+
             log(f"当前页面标题：{page.title()}")
 
             body_sample = page.locator(
@@ -512,7 +614,8 @@ def switch_date(page, date_text):
 
         except Exception as diagnostic_error:
             log(
-                f"读取超时页面诊断信息失败：{diagnostic_error}"
+                f"读取超时页面诊断信息失败："
+                f"{diagnostic_error}"
             )
 
         raise RuntimeError(
@@ -535,7 +638,8 @@ def switch_date(page, date_text):
 
     if caption.count() == 0:
         raise RuntimeError(
-            f"{date_text}：没有预约表，也没有检测到休馆日提示"
+            f"{date_text}：没有预约表，"
+            "也没有检测到休馆日提示"
         )
 
     actual_caption = caption.first.inner_text()
@@ -563,12 +667,13 @@ def get_target_slot_indexes(date_text, slots):
     weekday = value.weekday()
     holiday_name = jpholiday.is_holiday_name(value)
 
-    # 星期六优先：即使是节假日，也按4个时段处理。
+    # 星期六：4个时段
     if weekday == 5:
         if len(slots) != 4:
             raise RuntimeError(
                 f"{date_text} 是星期六，"
-                f"预期4个时段，实际读取到 {len(slots)} 个：{slots}"
+                f"预期4个时段，"
+                f"实际读取到 {len(slots)} 个：{slots}"
             )
 
         log(
@@ -579,37 +684,46 @@ def get_target_slot_indexes(date_text, slots):
 
         return list(range(4))
 
-    # 星期日：全部3个时段。
+    # 星期日：3个时段
     if weekday == 6:
         if len(slots) != 3:
             raise RuntimeError(
                 f"{date_text} 是星期日，"
-                f"预期3个时段，实际读取到 {len(slots)} 个：{slots}"
-            )
-
-        log(f"{date_text} 星期日：监控全部3个时段")
-        return list(range(3))
-
-    # 周一～周五的日本节假日：全部3个时段。
-    if holiday_name:
-        if len(slots) != 3:
-            raise RuntimeError(
-                f"{date_text} 是日本节假日（{holiday_name}），"
-                f"预期3个时段，实际读取到 {len(slots)} 个：{slots}"
+                f"预期3个时段，"
+                f"实际读取到 {len(slots)} 个：{slots}"
             )
 
         log(
-            f"{date_text} 日本节假日（{holiday_name}）："
+            f"{date_text} 星期日："
             "监控全部3个时段"
         )
 
         return list(range(3))
 
-    # 普通工作日：只监控18:00～21:00。
+    # 周一～周五日本节假日：3个时段
+    if holiday_name:
+        if len(slots) != 3:
+            raise RuntimeError(
+                f"{date_text} 是日本节假日"
+                f"（{holiday_name}），"
+                f"预期3个时段，"
+                f"实际读取到 {len(slots)} 个：{slots}"
+            )
+
+        log(
+            f"{date_text} 日本节假日"
+            f"（{holiday_name}）："
+            "监控全部3个时段"
+        )
+
+        return list(range(3))
+
+    # 普通工作日：只监控18:00～21:00
     if len(slots) != 4:
         raise RuntimeError(
             f"{date_text} 是普通工作日，"
-            f"预期4个原始时段，实际读取到 {len(slots)} 个：{slots}"
+            f"预期4个原始时段，"
+            f"实际读取到 {len(slots)} 个：{slots}"
         )
 
     evening_indexes = [
@@ -620,7 +734,8 @@ def get_target_slot_indexes(date_text, slots):
 
     if len(evening_indexes) != 1:
         raise RuntimeError(
-            f"{date_text}：无法唯一识别18:00～21:00时段，"
+            f"{date_text}："
+            "无法唯一识别18:00～21:00时段，"
             f"实际时段：{slots}"
         )
 
@@ -634,11 +749,14 @@ def get_target_slot_indexes(date_text, slots):
 
 # ============================================================
 # 解析时段标题
-# 统一全角半角字符，避免冒号识别失败
 # ============================================================
 
 def normalize_slot(text):
-    text = unicodedata.normalize("NFKC", text or "")
+    text = unicodedata.normalize(
+        "NFKC",
+        text or "",
+    )
+
     text = re.sub(r"\s+", "", text)
 
     return (
@@ -669,14 +787,16 @@ def parse_day(page, date_text):
 
     if expected not in caption:
         raise RuntimeError(
-            f"{date_text}：预约表标题不匹配：{caption}"
+            f"{date_text}："
+            f"预约表标题不匹配：{caption}"
         )
 
     rows = table.locator("tr")
 
     if rows.count() < 4:
         raise RuntimeError(
-            f"{date_text}：预约表行数异常：{rows.count()}"
+            f"{date_text}："
+            f"预约表行数异常：{rows.count()}"
         )
 
     header_cells = rows.nth(0).locator("td")
@@ -698,7 +818,8 @@ def parse_day(page, date_text):
         or any(not slot for slot in slots)
     ):
         raise RuntimeError(
-            f"{date_text}：时段数量或标题异常：{slots}"
+            f"{date_text}："
+            f"时段数量或标题异常：{slots}"
         )
 
     log(f"{date_text} 网页原始时段：{slots}")
@@ -723,7 +844,9 @@ def parse_day(page, date_text):
         if cells.count() < 2:
             continue
 
-        room_label = cells.nth(0).inner_text().strip()
+        room_label = (
+            cells.nth(0).inner_text().strip()
+        )
 
         if room_label not in ROOMS:
             continue
@@ -732,7 +855,8 @@ def parse_day(page, date_text):
 
         if room_code in found_rooms:
             raise RuntimeError(
-                f"{date_text}：区域 {room_code} 出现重复数据行"
+                f"{date_text}："
+                f"区域 {room_code} 出现重复数据行"
             )
 
         found_rooms.add(room_code)
@@ -752,24 +876,36 @@ def parse_day(page, date_text):
             if span < 1:
                 span = 1
 
-            expanded_cells.extend([cell] * span)
+            expanded_cells.extend(
+                [cell] * span
+            )
 
         if len(expanded_cells) != len(slots):
             raise RuntimeError(
-                f"{date_text}：区域 {room_code} 的格数与时段数不一致，"
-                f"格数={len(expanded_cells)}，时段数={len(slots)}"
+                f"{date_text}："
+                f"区域 {room_code} 的格数"
+                "与时段数不一致，"
+                f"格数={len(expanded_cells)}，"
+                f"时段数={len(slots)}"
             )
 
         for slot_index in target_indexes:
             slot = slots[slot_index]
             cell = expanded_cells[slot_index]
 
-            # checkbox 存在即可，disabled 也算空位。
+            # checkbox 存在即可
+            # disabled 也算空位
             has_checkbox = (
-                cell.locator('input[type="checkbox"]').count() > 0
+                cell.locator(
+                    'input[type="checkbox"]'
+                ).count() > 0
             )
 
-            key = f"{date_text}|{room_code}|{slot}"
+            key = (
+                f"{date_text}|"
+                f"{room_code}|"
+                f"{slot}"
+            )
 
             result[key] = {
                 "date": date_text,
@@ -784,15 +920,19 @@ def parse_day(page, date_text):
         )
 
         raise RuntimeError(
-            f"{date_text}：没有完整读取 A/B/C 三行，"
+            f"{date_text}："
+            "没有完整读取 A/B/C 三行，"
             f"缺少：{missing}"
         )
 
-    expected_cells = len(ROOMS) * len(target_slots)
+    expected_cells = (
+        len(ROOMS) * len(target_slots)
+    )
 
     if len(result) != expected_cells:
         raise RuntimeError(
-            f"{date_text}：读取单元格数量异常："
+            f"{date_text}："
+            "读取单元格数量异常："
             f"{len(result)} / {expected_cells}"
         )
 
@@ -806,7 +946,8 @@ def parse_day(page, date_text):
         f"{date_text} 读取完成："
         f"监控时段 {target_slots}，"
         f"A/B/C 共 {expected_cells} 格，"
-        f"发现 checkbox 空位 {available_count} 格"
+        f"发现 checkbox 空位 "
+        f"{available_count} 格"
     )
 
     return result
@@ -822,12 +963,15 @@ def load_state():
 
     try:
         data = json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
+            STATE_FILE.read_text(
+                encoding="utf-8"
+            )
         )
 
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(
-            "state.json 存在但无法读取，拒绝覆盖旧状态"
+            "state.json 存在但无法读取，"
+            "拒绝覆盖旧状态"
         ) from exc
 
     if (
@@ -867,9 +1011,12 @@ def send_ntfy(items, first_run=False):
     )
 
     heading = (
-        "竹之丸地区センター：当前检测到以下 checkbox 空位（首次基准）"
+        "竹之丸地区センター："
+        "当前检测到以下 checkbox 空位（首次基准）"
         if first_run
-        else "竹之丸地区センター：发现新的体育室空位"
+        else
+        "竹之丸地区センター："
+        "发现新的体育室空位"
     )
 
     chunks = []
@@ -883,22 +1030,35 @@ def send_ntfy(items, first_run=False):
         )
 
         if (
-            len("\n".join(current_lines + [line])) > 3000
+            len(
+                "\n".join(
+                    current_lines + [line]
+                )
+            ) > 3000
             and len(current_lines) > 2
         ):
-            chunks.append("\n".join(current_lines))
+            chunks.append(
+                "\n".join(current_lines)
+            )
             current_lines = [heading, ""]
 
         current_lines.append(line)
 
     if len(current_lines) > 2:
-        chunks.append("\n".join(current_lines))
+        chunks.append(
+            "\n".join(current_lines)
+        )
 
     total = len(chunks)
 
-    for index, message in enumerate(chunks, start=1):
+    for index, message in enumerate(
+        chunks,
+        start=1,
+    ):
         if total > 1:
-            message += f"\n\n（第 {index}/{total} 条）"
+            message += (
+                f"\n\n（第 {index}/{total} 条）"
+            )
 
         response = requests.post(
             NTFY_URL,
@@ -907,7 +1067,10 @@ def send_ntfy(items, first_run=False):
                 "title": "竹之丸地区中心空位通知",
                 "message": message,
                 "priority": 4,
-                "tags": ["badminton", "calendar"],
+                "tags": [
+                    "badminton",
+                    "calendar",
+                ],
             },
             timeout=30,
         )
@@ -915,7 +1078,8 @@ def send_ntfy(items, first_run=False):
         response.raise_for_status()
 
     log(
-        f"ntfy 通知发送完成：{len(items)} 个空位，"
+        f"ntfy 通知发送完成："
+        f"{len(items)} 个空位，"
         f"{total} 条消息"
     )
 
@@ -928,7 +1092,9 @@ def save_state(cells):
 
     payload = {
         "schema_version": 1,
-        "updated_at": datetime.now(JST).isoformat(),
+        "updated_at": (
+            datetime.now(JST).isoformat()
+        ),
         "cells": cells,
     }
 
@@ -975,9 +1141,14 @@ def main():
     today = datetime.now(JST).date()
 
     report = {
-        "run_time": datetime.now(JST).isoformat(),
+        "run_time": (
+            datetime.now(JST).isoformat()
+        ),
         "today": today.isoformat(),
-        "purpose": "竹之丸体育室 A/B/C checkbox 空位监控",
+        "purpose": (
+            "竹之丸体育室 A/B/C "
+            "checkbox 空位监控"
+        ),
         "monitor_rules": {
             "weekday": "18:00-21:00 only",
             "saturday": "all 4 slots",
@@ -1009,38 +1180,52 @@ def main():
             )
 
             try:
-                context, page = enter_reservation(browser)
+                context, page = enter_reservation(
+                    browser
+                )
 
                 months = get_months(page)
                 report["months"] = months
 
-                current_ym = today.strftime("%Y%m")
+                current_ym = today.strftime(
+                    "%Y%m"
+                )
 
                 all_dates = set()
                 calendar_closed_dates = set()
 
+                # 先收集所有可查询日期
                 for month in months:
                     if month < current_ym:
                         continue
 
-                    switch_month(page, month)
+                    switch_month(
+                        page,
+                        month,
+                    )
 
-                    month_date_status = get_dates(page)
+                    month_date_status = get_dates(
+                        page
+                    )
 
                     log(
                         f"{month} 日历中找到 "
-                        f"{len(month_date_status)} 个日期"
+                        f"{len(month_date_status)} "
+                        "个日期"
                     )
 
-                    for date_text, is_calendar_closed in (
-                        month_date_status.items()
-                    ):
-                        try:
-                            parsed_date = datetime.strptime(
-                                date_text,
-                                "%Y-%m-%d",
-                            ).date()
+                    for (
+                        date_text,
+                        is_calendar_closed,
+                    ) in month_date_status.items():
 
+                        try:
+                            parsed_date = (
+                                datetime.strptime(
+                                    date_text,
+                                    "%Y-%m-%d",
+                                ).date()
+                            )
                         except ValueError:
                             continue
 
@@ -1048,29 +1233,39 @@ def main():
                             all_dates.add(date_text)
 
                             if is_calendar_closed:
-                                calendar_closed_dates.add(date_text)
+                                calendar_closed_dates.add(
+                                    date_text
+                                )
 
                 dates = sorted(all_dates)
 
-                report["dates_found"] = len(dates)
+                report["dates_found"] = len(
+                    dates
+                )
 
                 log(
-                    f"今天及未来可查询日期：{len(dates)} 天"
+                    "今天及未来可查询日期："
+                    f"{len(dates)} 天"
                 )
 
                 if not dates:
                     raise RuntimeError(
-                        "没有找到今天及以后的可查询日期"
+                        "没有找到今天及以后的"
+                        "可查询日期"
                     )
 
                 if len(dates) > MAX_DATES_PER_RUN:
                     raise RuntimeError(
-                        f"可查询日期数量异常：{len(dates)}，"
-                        f"超过安全上限 {MAX_DATES_PER_RUN}"
+                        "可查询日期数量异常："
+                        f"{len(dates)}，"
+                        "超过安全上限 "
+                        f"{MAX_DATES_PER_RUN}"
                     )
 
                 current = {}
-                active_month = current_month(page)
+                active_month = current_month(
+                    page
+                )
 
                 closed_dates = set(
                     calendar_closed_dates
@@ -1080,18 +1275,28 @@ def main():
                     log(
                         "日历红色字体预判休馆日期："
                         + "、".join(
-                            sorted(calendar_closed_dates)
+                            sorted(
+                                calendar_closed_dates
+                            )
                         )
                     )
 
+                # 逐日检查
                 for date_text in dates:
 
-                    if date_text in calendar_closed_dates:
-                        report["dates_skipped"] += 1
+                    if (
+                        date_text
+                        in calendar_closed_dates
+                    ):
+                        report[
+                            "dates_skipped"
+                        ] += 1
 
                         log(
-                            f"{date_text} 日历字体为红色，"
-                            "判定休馆，直接跳过（未点击日期）"
+                            f"{date_text} "
+                            "日历字体为红色，"
+                            "判定休馆，"
+                            "直接跳过（未点击日期）"
                         )
 
                         continue
@@ -1108,18 +1313,27 @@ def main():
                         )
                         active_month = target_month
 
-                    is_open_for_booking = switch_date(
-                        page,
-                        date_text,
+                    is_open_for_booking = (
+                        switch_date(
+                            page,
+                            date_text,
+                        )
                     )
 
                     if not is_open_for_booking:
-                        report["dates_skipped"] += 1
-                        closed_dates.add(date_text)
+                        report[
+                            "dates_skipped"
+                        ] += 1
+
+                        closed_dates.add(
+                            date_text
+                        )
 
                         log(
-                            f"{date_text} 已记录为休馆日，"
-                            "不读取 A/B/C，不发送空位通知"
+                            f"{date_text} "
+                            "已记录为休馆日，"
+                            "不读取 A/B/C，"
+                            "不发送空位通知"
                         )
 
                         continue
@@ -1129,8 +1343,10 @@ def main():
                         date_text,
                     )
 
-                    overlap = set(current).intersection(
-                        day_cells
+                    overlap = (
+                        set(current).intersection(
+                            day_cells
+                        )
                     )
 
                     if overlap:
@@ -1140,7 +1356,10 @@ def main():
                         )
 
                     current.update(day_cells)
-                    report["dates_checked"] += 1
+
+                    report[
+                        "dates_checked"
+                    ] += 1
 
                 report["closed_dates"] = sorted(
                     closed_dates
@@ -1153,40 +1372,55 @@ def main():
 
                 if processed_dates != len(dates):
                     raise RuntimeError(
-                        f"查询结果不完整："
-                        f"正常查询 {report['dates_checked']} 天，"
-                        f"休馆跳过 {report['dates_skipped']} 天，"
-                        f"日历日期共 {len(dates)} 天"
+                        "查询结果不完整："
+                        "正常查询 "
+                        f"{report['dates_checked']} 天，"
+                        "休馆跳过 "
+                        f"{report['dates_skipped']} 天，"
+                        "日历日期共 "
+                        f"{len(dates)} 天"
                     )
 
                 if not current:
                     raise RuntimeError(
-                        "没有读取到任何正常预约日期，"
+                        "没有读取到任何正常"
+                        "预约日期，"
                         "拒绝更新 state.json"
                     )
 
-                report["cells_checked"] = len(current)
+                report["cells_checked"] = len(
+                    current
+                )
 
-                report["available_count"] = sum(
+                report[
+                    "available_count"
+                ] = sum(
                     1
                     for item in current.values()
                     if item["available"]
                 )
 
                 log(
-                    f"全部日期处理完成："
-                    f"正常查询 {report['dates_checked']} 天，"
-                    f"休馆跳过 {report['dates_skipped']} 天，"
-                    f"{report['cells_checked']} 个单元格，"
-                    f"checkbox 空位 {report['available_count']} 个"
+                    "全部日期处理完成："
+                    "正常查询 "
+                    f"{report['dates_checked']} 天，"
+                    "休馆跳过 "
+                    f"{report['dates_skipped']} 天，"
+                    f"{report['cells_checked']} "
+                    "个单元格，"
+                    "checkbox 空位 "
+                    f"{report['available_count']} 个"
                 )
 
                 if report["closed_dates"]:
                     log(
                         "本次跳过的休馆日期："
-                        + "、".join(report["closed_dates"])
+                        + "、".join(
+                            report["closed_dates"]
+                        )
                     )
 
+                # 对比历史状态
                 previous = load_state()
 
                 if previous is None:
@@ -1205,7 +1439,8 @@ def main():
                         )
                     else:
                         log(
-                            "首次运行没有发现 checkbox 空位，"
+                            "首次运行没有发现 "
+                            "checkbox 空位，"
                             "不发送通知"
                         )
 
@@ -1213,18 +1448,24 @@ def main():
                     to_notify = []
 
                     for key, item in current.items():
-                        old_value = previous.get(key)
+                        old_value = previous.get(
+                            key
+                        )
 
                         if (
                             old_value is not None
-                            and not was_available(old_value)
+                            and not was_available(
+                                old_value
+                            )
                             and item["available"]
                         ):
-                            to_notify.append(item)
+                            to_notify.append(
+                                item
+                            )
 
-                    report["newly_available_count"] = len(
-                        to_notify
-                    )
+                    report[
+                        "newly_available_count"
+                    ] = len(to_notify)
 
                     if to_notify:
                         send_ntfy(
@@ -1234,20 +1475,28 @@ def main():
                     else:
                         log(
                             "没有发现从无 checkbox "
-                            "变为有 checkbox 的新空位"
+                            "变为有 checkbox "
+                            "的新空位"
                         )
 
+                # 完整扫描成功后才更新状态
                 save_state(current)
 
-                log("state.json 已成功更新")
+                log(
+                    "state.json 已成功更新"
+                )
 
                 report["status"] = "success"
                 save_report(report)
 
                 if report["first_run"]:
-                    log("首次基准建立完成")
+                    log(
+                        "首次基准建立完成"
+                    )
                 else:
-                    log("本次监控运行完成")
+                    log(
+                        "本次监控运行完成"
+                    )
 
             except Exception:
                 if page is not None:
@@ -1273,7 +1522,9 @@ def main():
 
     except Exception as exc:
         report["status"] = "failed"
-        report["errors"].append(str(exc))
+        report["errors"].append(
+            str(exc)
+        )
 
         save_report(report)
 
